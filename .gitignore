@@ -1,1 +1,4 @@
 target/
+
+# Brand assets kept local (not uploaded to GitHub)
+/assets/brand/
