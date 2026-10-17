@@ -41,6 +41,7 @@ pub struct ProjectFile {
     pub change: crate::changes::ChangeSettings,
     pub sub: crate::subgraph::SubSettings,
     pub coords: crate::coords::CoordSettings,
+    pub boxes: crate::boxes::BoxSettings,
     pub cam3: crate::coords::Cam3,
     pub cam: ViewCam,
     pub auto_fit: bool,
@@ -66,6 +67,7 @@ impl Default for ProjectFile {
             change: Default::default(),
             sub: Default::default(),
             coords: Default::default(),
+            boxes: Default::default(),
             cam3: Default::default(),
             cam: ViewCam::default(),
             auto_fit: true,
@@ -140,6 +142,7 @@ impl App {
             change: s.change.clone(),
             sub: s.sub.clone(),
             coords: s.coords.clone(),
+            boxes: s.boxes.clone(),
             cam3: s.cam3,
             cam: self.cam,
             auto_fit: self.auto_fit,
@@ -207,6 +210,7 @@ impl App {
         self.s.change = Default::default();
         self.s.sub = Default::default();
         self.s.coords = Default::default();
+        self.s.boxes = Default::default();
         self.table.sort = None;
         self.project = None;
         self.after_graph_change();
@@ -300,10 +304,12 @@ impl App {
         self.s.change = pf.change.clone();
         self.s.sub = pf.sub.clone();
         self.s.coords = pf.coords.clone();
+        self.s.boxes = pf.boxes.clone();
         self.rebuild();
         self.s.look = pf.look.clone();
         self.s.restore_state(&pf.positions, &pf.pinned, &pf.selected, &pf.hidden);
         self.s.drop_missing_columns();
+        self.s.recompute_boxes();
         self.s.recompute_visibility();
         self.s.recompute_style();
         if pf.coords.enabled && self.s.coords_active() {

@@ -990,6 +990,126 @@ impl App {
     }
 }
 
+// ───────────────────────── bounding boxes ─────────────────────────
+
+impl App {
+    /// "Bounding boxes" block in the Layout tab, shown while the 3D view is on.
+    fn boxes_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
+        use crate::boxes::BoxColor;
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        crate::theme::heading(ui, "Bounding boxes");
+        ui.weak("Draw a 3D box for each node from six attributes: the minimum and maximum of X, Y and Z, in the same units as the coordinates.");
+        ui.add_space(4.0);
+        let numeric: Vec<ColInfo> = cols.iter().filter(|c| c.numeric && !c.metric).cloned().collect();
+        let mut recompute = false; // boxes change
+        let mut refit = false; // and the camera should look at them
+        let r = ui.switch(&mut self.s.boxes.enabled, "Show bounding boxes");
+        if r.changed() {
+            if self.s.boxes.enabled && !self.s.boxes.has_columns() {
+                let (min, max) = crate::boxes::guess_columns(&self.s.g);
+                for k in 0..3 {
+                    if self.s.boxes.min[k].is_none() {
+                        self.s.boxes.min[k] = min[k].clone();
+                    }
+                    if self.s.boxes.max[k].is_none() {
+                        self.s.boxes.max[k] = max[k].clone();
+                    }
+                }
+            }
+            recompute = true;
+            refit = true;
+        }
+        if self.s.boxes.enabled {
+            for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                row(ui, &format!("Min {axis}"), |ui| {
+                    if combo_col(ui, &format!("bx_min{k}"), &mut self.s.boxes.min[k], &numeric, true, "(choose a column)") {
+                        recompute = true;
+                        refit = true;
+                    }
+                });
+            }
+            for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                row(ui, &format!("Max {axis}"), |ui| {
+                    if combo_col(ui, &format!("bx_max{k}"), &mut self.s.boxes.max[k], &numeric, true, "(choose a column)") {
+                        recompute = true;
+                        refit = true;
+                    }
+                });
+            }
+            if !self.s.boxes.has_columns() {
+                ui.weak("Choose all six columns.");
+            }
+
+            ui.add_space(4.0);
+            ui.label("Boxes for these nodes");
+            let mut cur = self.s.boxes.rule.as_ref().map(|r| r.col.clone());
+            row(ui, "Attribute", |ui| {
+                if combo_col(ui, "bx_rule", &mut cur, cols, false, "(all nodes)") {
+                    self.s.boxes.rule = cur.as_ref().and_then(|c| self.s.g.node_col(c)).map(|col| {
+                        let mut r = Rule::new_for(col);
+                        if let RuleKind::Cats { allowed } = &mut r.kind {
+                            allowed.iter_mut().for_each(|a| *a = false); // tick the values you want
+                        }
+                        r
+                    });
+                    recompute = true;
+                    refit = true;
+                }
+            });
+            if let Some(rule) = &mut self.s.boxes.rule {
+                if let Some(col) = self.s.g.node_cols.iter().find(|c| c.name == rule.col) {
+                    theme::inner_card().show(ui, |ui| {
+                        recompute |= rule_body(ui, &mut rule.kind, col, 2000);
+                    });
+                }
+            }
+
+            ui.add_space(4.0);
+            ui.label("Colour");
+            ui.segmented(&mut self.s.boxes.color_mode, &[(BoxColor::Single, "One colour"), (BoxColor::Node, "Node colour")]);
+            if self.s.boxes.color_mode == BoxColor::Single {
+                row(ui, "Box colour", |ui| {
+                    ui.color_edit_button_srgb(&mut self.s.boxes.color);
+                });
+            } else {
+                ui.weak("Each box takes the colour of its node. Choose \"Colour by\" in the Appearance tab to colour them by an attribute.");
+            }
+            slider(ui, &mut self.s.boxes.fill, 0.0..=1.0, "Fill opacity", false);
+            slider(ui, &mut self.s.boxes.outline, 0.0..=1.0, "Outline opacity", false);
+            slider(ui, &mut self.s.boxes.line_width, 0.5..=6.0, "Outline width", false);
+            if ui.switch(&mut self.s.boxes.show_nodes, "Show nodes and edges").on_hover_text("Off shows the boxes alone. Nodes cannot be clicked then; use the table to select.").changed() {
+                refit = true;
+            }
+
+            let info = self.s.box_info;
+            if self.s.boxes.has_columns() {
+                ui.add_space(2.0);
+                let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("{n} {one}") } else { format!("{n} {many}") };
+                if info.n_match == 0 {
+                    ui.weak("Nothing matches yet. Tick the values you want above.");
+                } else if info.n_boxes == 0 {
+                    ui.weak("No boxes to draw: no matching node has all six values.");
+                } else {
+                    ui.label(crate::theme::secondary(plural(info.n_boxes, "box drawn", "boxes drawn")));
+                }
+                if info.n_incomplete > 0 {
+                    let who = plural(info.n_incomplete, "matching node has", "matching nodes have");
+                    let gets = if info.n_incomplete == 1 { "gets" } else { "get" };
+                    ui.label(crate::theme::secondary(format!("{who} a missing value and {gets} no box")));
+                }
+            }
+        }
+        if recompute {
+            self.s.recompute_boxes();
+        }
+        if refit {
+            self.auto_fit = true;
+        }
+    }
+}
+
 // ───────────────────────── node coordinates ─────────────────────────
 
 impl App {
@@ -1039,6 +1159,7 @@ impl App {
                     }
                 });
                 ui.weak("Drag to orbit, right-drag to pan, scroll to zoom, double-click empty space or press F to fit.");
+                self.boxes_section(ui, cols);
             }
             if self.s.coords.x.is_none() || self.s.coords.y.is_none() {
                 ui.weak("Choose the X and Y columns.");

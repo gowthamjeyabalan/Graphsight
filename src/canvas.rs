@@ -87,6 +87,17 @@ impl MeshSink {
         }
     }
 
+    /// A filled quad (corners in order round the outline).
+    fn poly4(&mut self, p: [Pos2; 4], c: Color32) {
+        self.reserve(4);
+        let base = self.cur.vertices.len() as u32;
+        for q in p {
+            self.vert(q, WHITE_UV, c);
+        }
+        self.tri(base, base + 1, base + 2);
+        self.tri(base, base + 2, base + 3);
+    }
+
     fn triangle(&mut self, p: [Pos2; 3], c: Color32) {
         self.reserve(3);
         let base = self.cur.vertices.len() as u32;
@@ -466,6 +477,7 @@ impl App {
         let n_edges = self.draw.edges.len() + self.draw.edges_back.len() + self.draw.edges_hi.len();
         let aa = n_edges <= 20_000;
         let arrows = self.s.g.directed && look.arrows && n_edges <= 15_000;
+        self.paint_boxes(painter, off);
         for (li, list) in [&self.draw.edges_back, &self.draw.edges, &self.draw.edges_hi].into_iter().enumerate() {
             let width = if li == 2 { width * 2.0 + 0.4 } else { width };
             if list.is_empty() {
@@ -517,6 +529,35 @@ impl App {
             for m in sink.finish() {
                 painter.add(Shape::mesh(m));
             }
+        }
+    }
+
+    /// Bounding boxes, far to near, behind the edges and nodes: translucent faces, then the outline. Edges that
+    /// run along the far side of a box are drawn fainter, which gives the box its depth.
+    fn paint_boxes(&self, painter: &Painter, off: Vec2) {
+        if self.draw.boxes.is_empty() {
+            return;
+        }
+        let aa = self.draw.boxes.len() <= 2_000;
+        let mut sink = MeshSink::new(TextureId::default());
+        for b in &self.draw.boxes {
+            let p = |k: usize| Pos2::new(b.c[k][0], b.c[k][1]) + off;
+            if b.fill > 0 {
+                let fill = Color32::from_rgba_unmultiplied(b.rgb[0], b.rgb[1], b.rgb[2], b.fill);
+                for f in &crate::boxes::FACES {
+                    sink.poly4([p(f[0]), p(f[1]), p(f[2]), p(f[3])], fill);
+                }
+            }
+            if b.line > 0 {
+                for &(a, c, f1, f2) in &crate::boxes::EDGES {
+                    let near = b.front[f1] || b.front[f2];
+                    let alpha = if near { b.line } else { (b.line as f32 * 0.4) as u8 };
+                    sink.line(p(a), p(c), b.width, Color32::from_rgba_unmultiplied(b.rgb[0], b.rgb[1], b.rgb[2], alpha), aa);
+                }
+            }
+        }
+        for m in sink.finish() {
+            painter.add(Shape::mesh(m));
         }
     }
 

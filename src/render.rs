@@ -41,6 +41,34 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
     build_draw_list(s, cam, size, &hi, &mut dl);
     let tf = Transform::from_scale(scale, scale);
 
+    // bounding boxes (3D view), far to near, behind everything else
+    for b in &dl.boxes {
+        if b.fill > 0 {
+            for f in &crate::boxes::FACES {
+                let mut pb = PathBuilder::new();
+                pb.move_to(b.c[f[0]][0], b.c[f[0]][1]);
+                for &k in &f[1..] {
+                    pb.line_to(b.c[k][0], b.c[k][1]);
+                }
+                pb.close();
+                if let Some(path) = pb.finish() {
+                    pm.fill_path(&path, &paint([b.rgb[0], b.rgb[1], b.rgb[2], b.fill]), FillRule::Winding, tf, None);
+                }
+            }
+        }
+        if b.line > 0 {
+            for &(a, c, f1, f2) in &crate::boxes::EDGES {
+                let alpha = if b.front[f1] || b.front[f2] { b.line } else { (b.line as f32 * 0.4) as u8 };
+                let mut pb = PathBuilder::new();
+                pb.move_to(b.c[a][0], b.c[a][1]);
+                pb.line_to(b.c[c][0], b.c[c][1]);
+                if let Some(path) = pb.finish() {
+                    pm.stroke_path(&path, &paint([b.rgb[0], b.rgb[1], b.rgb[2], alpha]), &Stroke { width: b.width, ..Default::default() }, tf, None);
+                }
+            }
+        }
+    }
+
     // edges, grouped by colour so uniform graphs need a single stroke call
     let stroke = Stroke { width: s.look.edge_width.max(0.2), ..Default::default() };
     let draw_edges = |pm: &mut Pixmap, edges: &[DrawEdge], wmul: f32| {
@@ -113,6 +141,25 @@ pub fn render_svg(s: &Session, cam: &ViewCam, w: f32, h: f32) -> String {
     let mut out = String::with_capacity(dl.nodes.len() * 90 + (dl.edges.len() + dl.edges_back.len() + dl.edges_hi.len()) * 100 + 512);
     let _ = writeln!(out, r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#);
     let _ = writeln!(out, r#"<rect width="100%" height="100%" fill="rgb({},{},{})"/>"#, bg[0], bg[1], bg[2]);
+    for b in &dl.boxes {
+        let rgb = format!("rgb({},{},{})", b.rgb[0], b.rgb[1], b.rgb[2]);
+        if b.fill > 0 {
+            for f in &crate::boxes::FACES {
+                let pts: Vec<String> = f.iter().map(|&k| format!("{:.1},{:.1}", b.c[k][0], b.c[k][1])).collect();
+                let _ = writeln!(out, r#"<polygon points="{}" fill="{rgb}" fill-opacity="{:.2}"/>"#, pts.join(" "), b.fill as f32 / 255.0);
+            }
+        }
+        if b.line > 0 {
+            for &(a, c, f1, f2) in &crate::boxes::EDGES {
+                let alpha = if b.front[f1] || b.front[f2] { b.line as f32 } else { b.line as f32 * 0.4 } / 255.0;
+                let _ = writeln!(
+                    out,
+                    r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{rgb}" stroke-opacity="{alpha:.2}" stroke-width="{:.1}"/>"#,
+                    b.c[a][0], b.c[a][1], b.c[c][0], b.c[c][1], b.width
+                );
+            }
+        }
+    }
     let _ = writeln!(out, r#"<g fill="none" stroke-width="{}">"#, s.look.edge_width);
     for (li, list) in [&dl.edges_back, &dl.edges, &dl.edges_hi].into_iter().enumerate() {
         for e in list.iter() {

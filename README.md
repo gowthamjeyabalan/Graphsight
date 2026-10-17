@@ -87,6 +87,15 @@ an axes gizmo in the corner, and nearer nodes drawn on top. Colour, size, filter
 all work in 3D; clicking and Shift-drag selection work on what you see. Layouts and dragging nodes are off while
 coordinates are used; switching them off brings the previous layout back.
 
+**Bounding boxes** — while the 3D view is on, a *Bounding boxes* block appears under the coordinates. Choose the six
+numeric attributes that hold each node's box (minimum and maximum of X, Y and Z, in the same units as the
+coordinates; columns named like `bbox_min_x` or `xmin` are found for you) and switch *Show bounding boxes* on. Pick an
+attribute and tick its values to draw boxes only for those nodes, for example every `room` but no `hall`. Boxes can be
+one colour or take their node's colour (so *Colour by* in Appearance colours them too), with sliders for fill opacity,
+outline opacity and outline width, and a switch to hide the nodes and edges so only the boxes show. Boxes follow the
+filters and the selected node's box is highlighted. They are also drawn in PNG and SVG exports, and the settings are
+saved in the session.
+
 **Directed and undirected edges** — if the edges file has a column saying `directed` / `undirected` for each edge
 (found automatically, or chosen in the import dialog), every edge keeps its own direction: arrows only on directed
 edges, in/out degree, PageRank and the hierarchical layout all follow it.
@@ -108,6 +117,7 @@ grapht --help
 | `expr.rs` | filter expression parser/evaluator |
 | `changes.rs` | finds the connections where an attribute changes, with per-value counts |
 | `coords.rs` | node coordinates → positions, the 3D orbit camera and its projection |
+| `boxes.rs` | bounding boxes: the six min/max columns, which nodes get a box, box geometry |
 | `subgraph.rs` | attribute sub-graphs, N-hop neighbours, joining separate pieces by shortest paths |
 | `layout.rs` | static layouts and the Barnes–Hut force simulation |
 | `model.rs` | session state: appearance, filters, selection, camera, per-frame draw list |

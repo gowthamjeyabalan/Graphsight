@@ -1,8 +1,9 @@
 //! The session: loaded data, graph, layout state, appearance, filters, selection.
 //! Free of any GUI toolkit so it can also drive the headless exporter and the tests.
 
+use crate::boxes::{self, BoxInfo, BoxItem, BoxSettings};
 use crate::changes::{self, ChangeInfo, ChangeSettings};
-use crate::coords::{self, Cam3, CoordSettings, Orbit};
+use crate::coords::{self, Cam3, CoordSettings, Orbit, Xform};
 use crate::data::*;
 use crate::expr;
 use crate::graph::{Graph, build_graph};
@@ -337,6 +338,12 @@ pub struct Session {
     pub cam3: Cam3,
     /// Nodes that have no value in a coordinate column.
     pub coords_missing: usize,
+    /// The transform that turned coordinate values into `pos3` (bounding boxes use it too).
+    pub coords_xform: Option<Xform>,
+    pub boxes: BoxSettings,
+    /// The boxes to draw (3D view only); empty while boxes are off.
+    pub box_items: Vec<BoxItem>,
+    pub box_info: BoxInfo,
     coords_saved_pos: Option<Vec<V2>>,
     /// Node positions from before the sub-graph was shown, put back when it is switched off.
     sub_saved_pos: Option<Vec<V2>>,
@@ -373,6 +380,10 @@ impl Default for Session {
             pos3: vec![],
             cam3: Cam3::default(),
             coords_missing: 0,
+            coords_xform: None,
+            boxes: BoxSettings::default(),
+            box_items: vec![],
+            box_info: BoxInfo::default(),
             coords_saved_pos: None,
             sub_saved_pos: None,
             expr_error: None,
@@ -511,6 +522,8 @@ impl Session {
         self.sub_saved_pos = None;
         self.coords_saved_pos = None;
         self.pos3.clear();
+        self.coords_xform = None;
+        self.recompute_boxes();
         self.recompute_subgraph();
         self.recompute_visibility();
         self.recompute_style();
@@ -653,6 +666,8 @@ impl Session {
                 self.pos = p.pos2;
                 self.pos3 = p.pos3;
                 self.coords_missing = p.missing;
+                self.coords_xform = Some(p.xform);
+                self.recompute_boxes();
                 self.sim.running = false;
                 self.anim = None;
                 self.fit_requested = true;
@@ -665,6 +680,8 @@ impl Session {
         // off, or the columns are not usable: go back to a normal layout
         self.pos3.clear();
         self.coords_missing = 0;
+        self.coords_xform = None;
+        self.recompute_boxes();
         if let Some(old) = self.coords_saved_pos.take() {
             if old.len() == self.pos.len() {
                 self.pos = old;
@@ -676,11 +693,42 @@ impl Session {
         }
     }
 
-    /// Point the 3D camera at the visible nodes (the viewing angle stays as it is).
+    /// Point the 3D camera at the visible nodes and their boxes (the viewing angle stays as it is).
     pub fn fit_cam3(&mut self) {
-        let pts: Vec<[f32; 3]> = (0..self.g.n()).filter(|&i| self.vis[i]).map(|i| self.pos3[i]).collect();
+        let boxes_shown = self.boxes_shown();
+        let mut pts: Vec<[f32; 3]> = if boxes_shown && !self.boxes.show_nodes {
+            vec![] // boxes alone: frame just those
+        } else {
+            (0..self.g.n()).filter(|&i| self.vis[i]).map(|i| self.pos3[i]).collect()
+        };
+        if boxes_shown {
+            for b in self.box_items.iter().filter(|b| self.vis[b.node as usize]) {
+                pts.push(b.lo);
+                pts.push(b.hi);
+            }
+        }
         let pts = if pts.is_empty() { self.pos3.clone() } else { pts };
         self.cam3.fit(&pts);
+    }
+
+    /// Work out the bounding boxes again (after a setting, the coordinates or the data changed).
+    pub fn recompute_boxes(&mut self) {
+        let (items, info) = match (&self.coords_xform, self.boxes.enabled && self.boxes.has_columns() && self.coords_active()) {
+            (Some(xf), true) => boxes::compute(&self.g, xf, &self.boxes),
+            _ => (vec![], BoxInfo::default()),
+        };
+        self.box_items = items;
+        self.box_info = info;
+    }
+
+    /// True while bounding boxes are on screen (3D view, boxes on, at least one box).
+    pub fn boxes_shown(&self) -> bool {
+        self.is_3d() && self.boxes.enabled && !self.box_items.is_empty()
+    }
+
+    /// True while the nodes and edges are hidden so that only the boxes show.
+    pub fn graph_hidden(&self) -> bool {
+        self.boxes_shown() && !self.boxes.show_nodes
     }
 
     /// How points are turned into screen positions right now (2D camera, or the 3D orbit camera).
@@ -891,6 +939,14 @@ impl Session {
             self.change.col = None;
             self.change.pick = None;
         }
+        for c in self.boxes.min.iter_mut().chain(self.boxes.max.iter_mut()) {
+            if c.as_ref().is_some_and(|name| g.node_col(name).is_none()) {
+                *c = None;
+            }
+        }
+        if self.boxes.rule.as_ref().is_some_and(|r| g.node_col(&r.col).is_none()) {
+            self.boxes.rule = None;
+        }
         if self.sub.rule.as_ref().is_some_and(|r| g.node_col(&r.col).is_none()) {
             self.sub.rule = None;
         }
@@ -1013,8 +1069,24 @@ pub struct DrawEdge {
     pub directed: bool,
 }
 
+/// A bounding box projected to the screen (3D only).
+pub struct DrawBox {
+    /// The eight corners (see `boxes::corner` for their order).
+    pub c: [[f32; 2]; 8],
+    /// Which faces look towards the camera.
+    pub front: [bool; 6],
+    pub rgb: [u8; 3],
+    /// Opacity of the faces and of the edges, 0 to 255.
+    pub fill: u8,
+    pub line: u8,
+    pub width: f32,
+    pub depth: f32,
+}
+
 #[derive(Default)]
 pub struct DrawList {
+    /// Bounding boxes, far to near; drawn before everything else.
+    pub boxes: Vec<DrawBox>,
     pub nodes: Vec<DrawNode>,
     /// Faded edges, drawn first.
     pub edges_back: Vec<DrawEdge>,
@@ -1035,6 +1107,7 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
     out.edges.clear();
     out.edges_back.clear();
     out.edges_hi.clear();
+    out.boxes.clear();
     let g = &s.g;
     let n = g.n();
     if n == 0 {
@@ -1042,6 +1115,14 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
     }
     let dim_hidden = s.look.filtered == FilteredMode::Dim;
     let proj = s.projector(cam, size);
+    if let Projector::Orbit(o) = &proj {
+        if s.boxes_shown() {
+            build_boxes(s, o, size, hi, out);
+        }
+        if s.graph_hidden() {
+            return;
+        }
+    }
     let pr: Vec<Option<(V2, f32, f32)>> = (0..n).map(|i| proj.at(s, i)).collect();
     let radius: Vec<f32> = (0..n).map(|i| pr[i].map(|p| node_radius_px(s.style.node_r[i], p.1)).unwrap_or(0.0)).collect();
     // in 3D, things further away fade a little
@@ -1160,8 +1241,67 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
     out.nodes = faded;
 }
 
+/// Project the bounding boxes of the visible nodes, far ones first.
+fn build_boxes(s: &Session, o: &Orbit, size: V2, hi: &Highlight, out: &mut DrawList) {
+    let st = &s.boxes;
+    let ink = |a: f32, k: f32| (a.clamp(0.0, 1.0) * k.clamp(0.0, 1.0) * 255.0).round() as u8;
+    for b in &s.box_items {
+        let i = b.node as usize;
+        if !s.vis[i] {
+            continue;
+        }
+        let mut c = [[0.0f32; 2]; 8];
+        let mut depth = 0.0;
+        let mut ok = true;
+        for k in 0..8 {
+            match o.project(boxes::corner(b, k)) {
+                Some((p, _, d)) => {
+                    c[k] = [p.x, p.y];
+                    depth += d * 0.125;
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue; // part of the box is behind the camera
+        }
+        let (mut x0, mut x1, mut y0, mut y1) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+        for p in &c {
+            x0 = x0.min(p[0]);
+            x1 = x1.max(p[0]);
+            y0 = y0.min(p[1]);
+            y1 = y1.max(p[1]);
+        }
+        if x1 < 0.0 || y1 < 0.0 || x0 > size.x || y0 > size.y {
+            continue;
+        }
+        let selected = s.sel[i];
+        let fade = if hi.active && !hi.hood[i] { 0.25 } else { 1.0 };
+        let rgb = match st.color_mode {
+            boxes::BoxColor::Single => st.color,
+            boxes::BoxColor::Node => s.style.node_rgb[i],
+        };
+        out.boxes.push(DrawBox {
+            c,
+            front: boxes::front_faces(b, o.eye),
+            rgb,
+            fill: ink(if selected { (st.fill * 1.8).max(0.12) } else { st.fill }, fade),
+            line: ink(if selected { 1.0 } else { st.outline }, fade),
+            width: st.line_width * if selected { 1.8 } else { 1.0 },
+            depth,
+        });
+    }
+    out.boxes.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+}
+
 /// Index of the visible node under `p` (screen space). In 2D the top-most (last drawn) wins, in 3D the nearest.
 pub fn pick_node(s: &Session, cam: &ViewCam, size: V2, p: V2) -> Option<usize> {
+    if s.graph_hidden() {
+        return None; // nothing is drawn to click on
+    }
     let proj = s.projector(cam, size);
     let mut best: Option<(usize, f32, f32)> = None; // index, pixel distance, depth
     for i in 0..s.g.n() {

@@ -24,8 +24,23 @@ impl Default for CoordSettings {
     }
 }
 
+/// How a raw coordinate value becomes a position: `(value − mid) × scale` on each axis. Bounding boxes use the
+/// same transform, so they line up with the nodes.
+#[derive(Clone, Copy, Debug)]
+pub struct Xform {
+    pub mid: [f64; 3],
+    pub scale: [f64; 3],
+}
+
+impl Xform {
+    pub fn apply(&self, p: [f64; 3]) -> [f32; 3] {
+        [0, 1, 2].map(|k| ((p[k] - self.mid[k]) * self.scale[k]) as f32)
+    }
+}
+
 /// Positions worked out from the coordinate columns.
 pub struct Placed {
+    pub xform: Xform,
     /// Screen-plane positions for the 2D view: x to the right, y up (so stored as −y).
     pub pos2: Vec<V2>,
     /// 3D positions: x right, y into the screen, z up.
@@ -91,7 +106,8 @@ pub fn place(g: &Graph, c: &CoordSettings) -> Option<Placed> {
         pos2.push(V2::new(x as f32, -(y as f32)));
         pos3.push([x as f32, y as f32, z as f32]);
     }
-    Some(Placed { pos2, pos3, missing })
+    let xform = Xform { mid: [mx, my, mz], scale: [sx, sy, sz] };
+    Some(Placed { xform, pos2, pos3, missing })
 }
 
 /// Pick likely X / Y / Z columns by name (x, pos_x, lon, easting, …). Only numeric columns qualify.
