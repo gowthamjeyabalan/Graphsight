@@ -40,6 +40,8 @@ pub struct ProjectFile {
     pub filter: FilterState,
     pub change: crate::changes::ChangeSettings,
     pub sub: crate::subgraph::SubSettings,
+    pub coords: crate::coords::CoordSettings,
+    pub cam3: crate::coords::Cam3,
     pub cam: ViewCam,
     pub auto_fit: bool,
     pub positions: Vec<(String, f32, f32)>,
@@ -63,6 +65,8 @@ impl Default for ProjectFile {
             filter: FilterState::default(),
             change: Default::default(),
             sub: Default::default(),
+            coords: Default::default(),
+            cam3: Default::default(),
             cam: ViewCam::default(),
             auto_fit: true,
             positions: vec![],
@@ -135,6 +139,8 @@ impl App {
             filter: s.filter.clone(),
             change: s.change.clone(),
             sub: s.sub.clone(),
+            coords: s.coords.clone(),
+            cam3: s.cam3,
             cam: self.cam,
             auto_fit: self.auto_fit,
             positions: (0..n).map(|i| (ids[i].clone(), s.pos[i].x, s.pos[i].y)).collect(),
@@ -200,6 +206,7 @@ impl App {
         self.s.filter = FilterState::default();
         self.s.change = Default::default();
         self.s.sub = Default::default();
+        self.s.coords = Default::default();
         self.table.sort = None;
         self.project = None;
         self.after_graph_change();
@@ -292,12 +299,16 @@ impl App {
         self.s.filter = pf.filter.clone();
         self.s.change = pf.change.clone();
         self.s.sub = pf.sub.clone();
+        self.s.coords = pf.coords.clone();
         self.rebuild();
         self.s.look = pf.look.clone();
         self.s.restore_state(&pf.positions, &pf.pinned, &pf.selected, &pf.hidden);
         self.s.drop_missing_columns();
         self.s.recompute_visibility();
         self.s.recompute_style();
+        if pf.coords.enabled && self.s.coords_active() {
+            self.s.cam3 = pf.cam3;
+        }
         self.cam = pf.cam;
         self.auto_fit = pf.auto_fit;
         self.table.sort = pf.table_sort.clone();
@@ -314,7 +325,7 @@ impl App {
 
 fn valid_edge_mapping(m: &EdgeMapping, t: &RawTable) -> EdgeMapping {
     let n = t.headers.len();
-    if m.src < n && m.dst < n && m.weight.is_none_or(|w| w < n) { m.clone() } else { auto_edge_mapping(t) }
+    if m.src < n && m.dst < n && m.weight.is_none_or(|w| w < n) && m.dir_col.is_none_or(|d| d < n) { m.clone() } else { auto_edge_mapping(t) }
 }
 
 fn valid_node_mapping(m: &NodeMapping, t: &RawTable) -> NodeMapping {

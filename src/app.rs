@@ -568,7 +568,20 @@ impl App {
                                 }
                             });
                         });
-                        ui.checkbox(&mut m.directed, "Directed edges (source → target)");
+                        ui.horizontal(|ui| {
+                            ui.label("Direction column");
+                            let cur = m.dir_col.map(|w| headers[w].clone()).unwrap_or_else(|| "(none)".into());
+                            egui::ComboBox::from_id_salt("m_dir").selected_text(cur).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut m.dir_col, None, "(none)");
+                                for (i, h) in headers.iter().enumerate() {
+                                    ui.selectable_value(&mut m.dir_col, Some(i), h);
+                                }
+                            });
+                        });
+                        if m.dir_col.is_some() {
+                            ui.weak("Each edge's own value (directed / undirected) decides. The switch below is used for rows without a recognised value.");
+                        }
+                        ui.checkbox(&mut m.directed, if m.dir_col.is_some() { "Directed when the column is empty or unknown" } else { "Directed edges (source → target)" });
                     }
                     PendKind::Nodes(m) => pick(ui, "m_id", "ID column", &mut m.id),
                 }

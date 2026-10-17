@@ -1,4 +1,9 @@
-# Grapht
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/grapht-logo-dark.svg">
+    <img src="assets/readme/grapht-logo-light.svg" alt="Grapht" width="340">
+  </picture>
+</p>
 
 A fast native desktop app (Rust, egui + wgpu) for exploring graphs stored in **CSV** and **JSON** files.
 Load an edges file and, optionally, a nodes file with attributes; colour, size, filter and sort the graph by
@@ -6,6 +11,12 @@ those attributes; switch between layouts; export PNG / SVG.
 
 Designed for graphs of roughly 1 000 – 10 000 nodes. Measured on a 2-core cloud VM with a 10 000-node /
 50 000-edge graph: load + metrics 88 ms, force layout converges in ~3 s, one UI frame costs ~6 ms of CPU.
+
+## Download
+
+Ready-made Windows builds are on the repository's **Releases** page: download `grapht-windows-x64.zip`, unzip it
+and run `grapht.exe` (no install needed). Windows may show a SmartScreen warning for an unsigned app; choose
+*More info ▸ Run anyway*.
 
 ## Build and run
 
@@ -68,6 +79,18 @@ dimmer). *Highlight where a value changes* marks the connections whose two ends 
 `Level` goes 1 → 2), rings the nodes on them, lists every kind of change with its count (click a row to see just
 that one), and can show only the changes, also joined into one graph. Both respect the filter.
 
+**Node coordinates and 3D** — in the *Layout* tab, *Place nodes by coordinates* puts every node at the X / Y values
+stored in two numeric attributes (columns named x, y, z, lon, lat … are picked automatically), instead of running a
+layout. Add a Z column and a *2D / 3D orbit* switch appears. The 3D view is a perspective camera: drag to orbit,
+right-drag to pan, scroll to zoom, Top / Front / Side / Perspective presets, double-click empty space or `F` to fit,
+an axes gizmo in the corner, and nearer nodes drawn on top. Colour, size, filters, subgraphs and change highlighting
+all work in 3D; clicking and Shift-drag selection work on what you see. Layouts and dragging nodes are off while
+coordinates are used; switching them off brings the previous layout back.
+
+**Directed and undirected edges** — if the edges file has a column saying `directed` / `undirected` for each edge
+(found automatically, or chosen in the import dialog), every edge keeps its own direction: arrows only on directed
+edges, in/out degree, PageRank and the hierarchical layout all follow it.
+
 ## Headless export / scripting
 
 ```
@@ -84,6 +107,7 @@ grapht --help
 | `graph.rs` | graph construction, adjacency, metrics (PageRank, k-core, components, Louvain) |
 | `expr.rs` | filter expression parser/evaluator |
 | `changes.rs` | finds the connections where an attribute changes, with per-value counts |
+| `coords.rs` | node coordinates → positions, the 3D orbit camera and its projection |
 | `subgraph.rs` | attribute sub-graphs, N-hop neighbours, joining separate pieces by shortest paths |
 | `layout.rs` | static layouts and the Barnes–Hut force simulation |
 | `model.rs` | session state: appearance, filters, selection, camera, per-frame draw list |
@@ -92,6 +116,8 @@ grapht --help
 | `theme.rs` | fonts, colours, spacing and small widgets (switch, segmented control) |
 | `dock.rs` | the dockable workspace: which panels exist, the default layout |
 | `project.rs`, `config.rs` | `.grapht` session files; per-user settings, recent files and saved panel layout |
+| `assets/readme` | the logo files shown at the top of this README |
+| `.github/workflows/release.yml` | tests, then builds the Windows exe and publishes a GitHub release when a `v*` tag is pushed |
 | `vendor/egui_dock` | the `egui_dock` docking crate (MIT), ported to egui 0.37 (one-line change) |
 
 `cargo test --release` runs the unit tests (60+), including headless UI tests that feed pointer, wheel and keyboard events
@@ -100,7 +126,7 @@ prints the large-graph timings.
 
 ## Known limitations
 
-* Developed and tested on Linux (including the real window under a virtual display); not yet run on Windows or macOS.
+* Developed on Linux (including the real window under a virtual display) and used on Windows; not yet run on macOS.
 * Labels are not included in PNG exports (SVG has them); curved/bundled edges are not implemented.
 * Louvain communities are deterministic but not tuned (resolution is fixed at 1.0).
 * The whole table is loaded into memory — fine for files of a few MB, not meant for multi-GB inputs.

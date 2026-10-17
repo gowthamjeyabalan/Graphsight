@@ -190,7 +190,15 @@ impl App {
                     ));
                 });
                 ui.horizontal(|ui| {
-                    if ui.switch(&mut src.mapping.directed, "Directed").changed() {
+                    if let Some(dc) = src.mapping.dir_col {
+                        let nd = self.s.g.edge_dir.iter().filter(|d| **d).count();
+                        ui.weak(format!(
+                            "Direction: {} · {} directed, {} undirected",
+                            src.table.headers.get(dc).map(String::as_str).unwrap_or("?"),
+                            nd,
+                            self.s.g.edge_dir.len() - nd
+                        ));
+                    } else if ui.switch(&mut src.mapping.directed, "Directed").changed() {
                         directed_changed = true;
                     }
                     if ui.small_button("Remap…").clicked() {
@@ -263,6 +271,9 @@ impl App {
             if st.duplicate_node_rows > 0 {
                 notes.push(format!("{} duplicate node ids ignored", st.duplicate_node_rows));
             }
+            if st.unknown_direction > 0 {
+                notes.push(format!("{} edges have an unrecognised direction value (default used)", st.unknown_direction));
+            }
             if st.nodes_from_edges_only > 0 {
                 notes.push(format!("{} nodes appear only in the edges file", st.nodes_from_edges_only));
             }
@@ -276,6 +287,11 @@ impl App {
 
     fn section_layout(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
         body(ui, |ui| {
+            if self.coords_section(ui, cols) {
+                return; // the nodes sit at their coordinates: layout controls do not apply
+            }
+            ui.add_space(6.0);
+            crate::theme::heading(ui, "Layout");
             let mut apply = false;
             let mut kind = self.s.layout.kind;
             ComboBox::from_id_salt("layout_kind").selected_text(kind.name()).width(ui.available_width() - 12.0).show_ui(ui, |ui| {
@@ -592,7 +608,11 @@ impl App {
                 for (k, v) in [
                     ("Nodes", n.to_string()),
                     ("Edges", e.to_string()),
-                    ("Type", if g.directed { "directed".into() } else { "undirected".into() }),
+                    ("Type", match g.edge_dir.iter().filter(|d| **d).count() {
+                        0 => "undirected".into(),
+                        k if k == g.edge_dir.len() => "directed".into(),
+                        k => format!("mixed ({k} directed)"),
+                    }),
                     ("Average degree", format!("{:.2}", 2.0 * e as f64 / n as f64)),
                     ("Max degree", format!("{max_deg:.0}")),
                     ("Density", format!("{density:.5}")),
@@ -632,6 +652,10 @@ impl App {
     pub fn select_and_focus(&mut self, i: usize) {
         self.s.select_only(i);
         self.auto_fit = false;
+        if self.s.is_3d() {
+            self.s.cam3.target = self.s.pos3[i];
+            return;
+        }
         self.cam.center = self.s.pos[i];
         self.cam.zoom = self.cam.zoom.max(0.8);
     }
@@ -963,5 +987,74 @@ impl App {
                 self.s.recompute_changes();
             }
         });
+    }
+}
+
+// ───────────────────────── node coordinates ─────────────────────────
+
+impl App {
+    /// The "Node coordinates" block at the top of the Layout tab. Returns true while coordinates are in use.
+    fn coords_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) -> bool {
+        use crate::coords::View3;
+        crate::theme::heading(ui, "Node coordinates");
+        let numeric: Vec<ColInfo> = cols.iter().filter(|c| c.numeric && !c.metric).cloned().collect();
+        let mut dirty = false;
+        let r = ui
+            .switch(&mut self.s.coords.enabled, "Place nodes by coordinates")
+            .on_hover_text("Put every node at the X / Y (and Z) values stored in its attributes instead of running a layout.");
+        if r.changed() {
+            if self.s.coords.enabled && self.s.coords.x.is_none() && self.s.coords.y.is_none() {
+                let (x, y, z) = crate::coords::guess_columns(&self.s.g);
+                self.s.coords.three_d = z.is_some() && x.is_some() && y.is_some();
+                self.s.coords.x = x;
+                self.s.coords.y = y;
+                self.s.coords.z = z;
+            }
+            dirty = true;
+        }
+        if self.s.coords.enabled {
+            if numeric.len() < 2 {
+                ui.weak("Needs at least two numeric node attributes (for X and Y).");
+            }
+            row(ui, "X", |ui| dirty |= combo_col(ui, "co_x", &mut self.s.coords.x, &numeric, true, "(choose a column)"));
+            row(ui, "Y", |ui| dirty |= combo_col(ui, "co_y", &mut self.s.coords.y, &numeric, true, "(choose a column)"));
+            row(ui, "Z (optional)", |ui| dirty |= combo_col(ui, "co_z", &mut self.s.coords.z, &numeric, true, "(none: flat)"));
+            dirty |= ui.switch(&mut self.s.coords.keep_aspect, "Keep true proportions").on_hover_text("On: one scale for all axes. Off: every axis is stretched to the same size.").changed();
+            // the 3D choice only exists once there is a Z column to look at
+            if self.s.coords.z.is_some() && self.s.coords.x.is_some() && self.s.coords.y.is_some() {
+                ui.label("View");
+                if ui.segmented(&mut self.s.coords.three_d, &[(false, "2D (top down)"), (true, "3D orbit")]) {
+                    self.auto_fit = true;
+                }
+            } else if self.s.coords.three_d {
+                self.s.coords.three_d = false;
+            }
+            if self.s.is_3d() {
+                ui.horizontal_wrapped(|ui| {
+                    for (label, v) in [("Top", View3::Top), ("Front", View3::Front), ("Side", View3::Side), ("Perspective", View3::Iso)] {
+                        if ui.small_button(label).clicked() {
+                            self.s.cam3.preset(v);
+                            self.auto_fit = true;
+                        }
+                    }
+                });
+                ui.weak("Drag to orbit, right-drag to pan, scroll to zoom, double-click empty space or press F to fit.");
+            }
+            if self.s.coords.x.is_none() || self.s.coords.y.is_none() {
+                ui.weak("Choose the X and Y columns.");
+            } else if self.s.coords_active() {
+                if self.s.coords_missing > 0 {
+                    ui.label(crate::theme::secondary(format!("{} nodes have no coordinate and sit in the middle", self.s.coords_missing)));
+                }
+                ui.weak("Layouts and dragging nodes are off while coordinates are used.");
+            } else {
+                ui.weak("These columns hold text in some rows, so they cannot be used as coordinates.");
+            }
+        }
+        if dirty {
+            self.s.apply_coords();
+            self.auto_fit = true;
+        }
+        self.s.coords_active()
     }
 }

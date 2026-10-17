@@ -195,6 +195,11 @@ impl App {
         self.run_simulation(ui);
         self.handle_input(ui, &resp, rect);
 
+        // the 3D camera simply re-frames the visible nodes
+        if self.auto_fit && self.s.is_3d() {
+            self.s.fit_cam3();
+            self.auto_fit = false;
+        }
         // camera follows the layout while it is still moving
         if self.auto_fit {
             let target = self.s.fit_camera(size);
@@ -266,7 +271,10 @@ impl App {
             let scroll = ui.input(|i| i.smooth_scroll_delta().y);
             let pinch = ui.input(|i| i.zoom_delta());
             let factor = pinch * (scroll * 0.0016).exp();
-            if (factor - 1.0).abs() > 1e-4 {
+            if (factor - 1.0).abs() > 1e-4 && self.s.is_3d() {
+                self.s.cam3.dist /= factor;
+                self.s.cam3.clamp();
+            } else if (factor - 1.0).abs() > 1e-4 {
                 if let Some(p) = ptr {
                     let p = Vec2::new(p.x, p.y);
                     let before = self.cam.to_world(p, size);
@@ -304,7 +312,10 @@ impl App {
                         }
                         self.s.set_selected(h, true);
                     }
-                    self.drag_node = Some(h);
+                    // with coordinates the nodes stay where their data puts them
+                    if !self.s.coords_active() {
+                        self.drag_node = Some(h);
+                    }
                 }
             }
         }
@@ -329,6 +340,12 @@ impl App {
                 }
                 self.auto_fit = false;
                 ui.ctx().request_repaint();
+            } else if self.box_start.is_none() && self.s.is_3d() {
+                let d = resp.drag_delta();
+                self.s.cam3.yaw -= d.x * 0.008;
+                self.s.cam3.pitch += d.y * 0.008;
+                self.s.cam3.clamp();
+                ui.ctx().request_repaint();
             } else if self.box_start.is_none() {
                 self.cam.center -= resp.drag_delta() / self.cam.zoom;
                 self.auto_fit = false;
@@ -337,8 +354,18 @@ impl App {
             }
         }
         if resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Secondary) {
-            self.cam.center -= resp.drag_delta() / self.cam.zoom;
-            self.auto_fit = false;
+            if self.s.is_3d() {
+                // pan: slide the target across the view plane
+                let o = self.s.cam3.orbit(size);
+                let ppu = o.focal / self.s.cam3.dist;
+                let d = resp.drag_delta() / ppu;
+                for k in 0..3 {
+                    self.s.cam3.target[k] += -o.right[k] * d.x + o.up[k] * d.y;
+                }
+            } else {
+                self.cam.center -= resp.drag_delta() / self.cam.zoom;
+                self.auto_fit = false;
+            }
         }
         // drag end
         if resp.drag_stopped() {
@@ -348,11 +375,13 @@ impl App {
                     if !(mods.ctrl || mods.command) {
                         self.s.clear_selection();
                     }
+                    let proj = self.s.projector(&self.cam, size);
                     for i in 0..self.s.g.n() {
                         if self.s.vis[i] {
-                            let sp = self.cam.to_screen(self.s.pos[i], size) + rect.min.to_vec2();
-                            if r.contains(sp.to_pos2()) {
-                                self.s.set_selected(i, true);
+                            if let Some((sp, _, _)) = proj.at(&self.s, i) {
+                                if r.contains((sp + rect.min.to_vec2()).to_pos2()) {
+                                    self.s.set_selected(i, true);
+                                }
                             }
                         }
                     }
@@ -446,7 +475,7 @@ impl App {
             for e in list.iter() {
                 let c = col(e.rgba);
                 sink.line(Pos2::new(e.a[0], e.a[1]) + off, Pos2::new(e.b[0], e.b[1]) + off, width, c, aa);
-                if arrows {
+                if arrows && e.directed {
                     if let Some(t) = arrow_points(e.a, e.b, e.target_r) {
                         sink.triangle([Pos2::new(t[0][0], t[0][1]) + off, Pos2::new(t[1][0], t[1][1]) + off, Pos2::new(t[2][0], t[2][1]) + off], c);
                     }
@@ -521,6 +550,30 @@ impl App {
         }
     }
 
+    /// Small X / Y / Z axes in the corner that turn with the camera.
+    fn paint_gizmo(&self, painter: &Painter, rect: Rect, tc: Color32) {
+        let o = self.s.cam3.orbit(rect.size());
+        let centre = rect.right_bottom() + Vec2::new(-58.0, -58.0);
+        let len = 34.0;
+        painter.circle_filled(centre, len + 12.0, Color32::from_rgba_unmultiplied(128, 128, 140, 22));
+        let mut axes = [
+            ("X", [1.0f32, 0.0, 0.0], Color32::from_rgb(255, 99, 90)),
+            ("Y", [0.0, 1.0, 0.0], Color32::from_rgb(90, 210, 130)),
+            ("Z", [0.0, 0.0, 1.0], Color32::from_rgb(10, 132, 255)),
+        ];
+        // axes pointing away from us go first so the near ones sit on top
+        let depth = |a: &[f32; 3]| a[0] * o.fwd[0] + a[1] * o.fwd[1] + a[2] * o.fwd[2];
+        axes.sort_by(|a, b| depth(&b.1).total_cmp(&depth(&a.1)));
+        for (name, a, c) in axes {
+            let (dx, dy) = o.axis(a);
+            let end = centre + Vec2::new(dx, -dy) * len;
+            painter.line_segment([centre, end], Stroke::new(2.2, c));
+            painter.circle_filled(end, 7.0, c);
+            painter.text(end, Align2::CENTER_CENTER, name, FontId::proportional(9.5), Color32::WHITE);
+        }
+        let _ = tc;
+    }
+
     fn paint_overlays(&self, painter: &Painter, rect: Rect) {
         let t = self.s.look.text_color();
         let tc = Color32::from_rgba_unmultiplied(t[0], t[1], t[2], 170);
@@ -537,7 +590,13 @@ impl App {
         } else if self.sim_paused && self.s.layout.kind == LayoutKind::Force {
             txt += " · layout paused";
         }
+        if self.s.is_3d() {
+            txt += " · drag to orbit · right-drag to pan · scroll to zoom";
+        }
         painter.text(rect.left_bottom() + Vec2::new(10.0, -10.0), Align2::LEFT_BOTTOM, txt, FontId::proportional(12.0), tc);
+        if self.s.is_3d() {
+            self.paint_gizmo(painter, rect, tc);
+        }
 
         if let Some(start) = self.box_start {
             if let Some(cur) = painter.ctx().pointer_latest_pos() {

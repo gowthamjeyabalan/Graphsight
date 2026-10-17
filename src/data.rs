@@ -114,7 +114,43 @@ pub struct EdgeMapping {
     pub src: usize,
     pub dst: usize,
     pub weight: Option<usize>,
+    /// Applies to every edge, unless `dir_col` says otherwise for that row.
     pub directed: bool,
+    /// Column that says per edge whether it is "directed" or "undirected".
+    #[serde(default)]
+    pub dir_col: Option<usize>,
+}
+
+/// Read the value of a direction column: Some(true) = directed, Some(false) = undirected, None = not recognised.
+pub fn parse_direction(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "directed" | "direct" | "d" | "dir" | "true" | "yes" | "y" | "1" | "->" | "→" | "arrow" | "one-way" | "oneway" | "one way" => Some(true),
+        "undirected" | "undirect" | "u" | "undir" | "false" | "no" | "n" | "0" | "--" | "-" | "mutual" | "both" | "bidirectional" | "two-way" | "twoway" | "two way" => Some(false),
+        _ => None,
+    }
+}
+
+/// A column named like a direction column (mostly recognisable values), or any column whose values are all
+/// recognisable and include words such as "directed"/"undirected".
+fn find_direction_column(t: &RawTable, skip: &[usize]) -> Option<usize> {
+    const NAMES: &[&str] = &["direction", "directed", "is_directed", "dir", "edge_direction", "edge_type", "link_type", "connection_type", "type"];
+    for (ci, h) in t.headers.iter().enumerate() {
+        if skip.contains(&ci) {
+            continue;
+        }
+        let vals: Vec<String> = t.rows.iter().map(|r| r[ci].trim().to_ascii_lowercase()).filter(|v| !v.is_empty()).collect();
+        if vals.is_empty() {
+            continue;
+        }
+        let known = vals.iter().filter(|v| parse_direction(v).is_some()).count();
+        let named = NAMES.iter().any(|n| h.trim().eq_ignore_ascii_case(n));
+        let worded = vals.iter().any(|v| v.contains("directed") || v.contains("direct"));
+        // a column called "direction" may hold the odd typo; any other column must be clean
+        if (named && known * 10 >= vals.len() * 8 && known > 0) || (worded && known == vals.len()) {
+            return Some(ci);
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,7 +165,8 @@ pub fn auto_edge_mapping(t: &RawTable) -> EdgeMapping {
         dst = if src == 0 { 1 } else { 0 };
     }
     let weight = find_alias(&t.headers, WEIGHT_NAMES).filter(|&w| w != src && w != dst);
-    EdgeMapping { src, dst, weight, directed: false }
+    let dir_col = find_direction_column(t, &[src, dst]);
+    EdgeMapping { src, dst, weight, directed: false, dir_col }
 }
 
 pub fn auto_node_mapping(t: &RawTable) -> NodeMapping {

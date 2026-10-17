@@ -2,6 +2,7 @@
 //! Free of any GUI toolkit so it can also drive the headless exporter and the tests.
 
 use crate::changes::{self, ChangeInfo, ChangeSettings};
+use crate::coords::{self, Cam3, CoordSettings, Orbit};
 use crate::data::*;
 use crate::expr;
 use crate::graph::{Graph, build_graph};
@@ -330,6 +331,13 @@ pub struct Session {
     pub change_info: Option<ChangeInfo>,
     pub sub: SubSettings,
     pub sub_info: Option<SubInfo>,
+    pub coords: CoordSettings,
+    /// 3D positions (x right, y into the screen, z up); filled while node coordinates are in use.
+    pub pos3: Vec<[f32; 3]>,
+    pub cam3: Cam3,
+    /// Nodes that have no value in a coordinate column.
+    pub coords_missing: usize,
+    coords_saved_pos: Option<Vec<V2>>,
     /// Node positions from before the sub-graph was shown, put back when it is switched off.
     sub_saved_pos: Option<Vec<V2>>,
     pub expr_error: Option<String>,
@@ -361,6 +369,11 @@ impl Default for Session {
             change_info: None,
             sub: SubSettings::default(),
             sub_info: None,
+            coords: CoordSettings::default(),
+            pos3: vec![],
+            cam3: Cam3::default(),
+            coords_missing: 0,
+            coords_saved_pos: None,
             sub_saved_pos: None,
             expr_error: None,
             vis: vec![],
@@ -487,10 +500,26 @@ impl Session {
         if self.sub.rule.as_ref().is_some_and(|r| self.g.node_col(&r.col).is_none()) {
             self.sub.rule = None;
         }
+        for c in [&mut self.coords.x, &mut self.coords.y, &mut self.coords.z] {
+            if c.as_ref().is_some_and(|name| self.g.node_col(name).is_none()) {
+                *c = None;
+            }
+        }
+        if self.coords.x.is_none() || self.coords.y.is_none() {
+            self.coords.enabled = false;
+        }
         self.sub_saved_pos = None;
+        self.coords_saved_pos = None;
+        self.pos3.clear();
         self.recompute_subgraph();
         self.recompute_visibility();
         self.recompute_style();
+        if self.coords.enabled {
+            self.apply_coords();
+            if self.coords_active() {
+                return;
+            }
+        }
         if first_time {
             if from_file * 2 >= n && n > 0 {
                 self.fit_requested = true; // keep the file's own positions
@@ -602,6 +631,63 @@ impl Session {
         }
     }
 
+    // ── node coordinates ──
+
+    /// True while nodes are placed by their coordinate columns (layouts and dragging are off).
+    pub fn coords_active(&self) -> bool {
+        self.coords.enabled && !self.g.ids.is_empty() && self.pos3.len() == self.g.n()
+    }
+
+    /// True while the 3D orbit view is shown.
+    pub fn is_3d(&self) -> bool {
+        self.coords_active() && self.coords.three_d && self.coords.z.is_some()
+    }
+
+    /// Place the nodes by the chosen columns, or hand the layout back when coordinates are switched off.
+    pub fn apply_coords(&mut self) {
+        if self.coords.enabled {
+            if let Some(p) = coords::place(&self.g, &self.coords) {
+                if self.coords_saved_pos.is_none() {
+                    self.coords_saved_pos = Some(self.pos.clone());
+                }
+                self.pos = p.pos2;
+                self.pos3 = p.pos3;
+                self.coords_missing = p.missing;
+                self.sim.running = false;
+                self.anim = None;
+                self.fit_requested = true;
+                if self.is_3d() {
+                    self.fit_cam3();
+                }
+                return;
+            }
+        }
+        // off, or the columns are not usable: go back to a normal layout
+        self.pos3.clear();
+        self.coords_missing = 0;
+        if let Some(old) = self.coords_saved_pos.take() {
+            if old.len() == self.pos.len() {
+                self.pos = old;
+            }
+            self.fit_requested = true;
+            self.refresh_sim_if_force();
+        } else if self.g.n() > 0 {
+            self.apply_layout();
+        }
+    }
+
+    /// Point the 3D camera at the visible nodes (the viewing angle stays as it is).
+    pub fn fit_cam3(&mut self) {
+        let pts: Vec<[f32; 3]> = (0..self.g.n()).filter(|&i| self.vis[i]).map(|i| self.pos3[i]).collect();
+        let pts = if pts.is_empty() { self.pos3.clone() } else { pts };
+        self.cam3.fit(&pts);
+    }
+
+    /// How points are turned into screen positions right now (2D camera, or the 3D orbit camera).
+    pub fn projector(&self, cam: &ViewCam, size: V2) -> Projector {
+        if self.is_3d() { Projector::Orbit(self.cam3.orbit(size)) } else { Projector::Flat { cam: *cam, size } }
+    }
+
     pub fn recompute_style(&mut self) {
         self.style = compute_style(&self.g, &self.look);
     }
@@ -700,6 +786,9 @@ impl Session {
     }
 
     pub fn setup_force(&mut self) {
+        if self.coords_active() {
+            return;
+        }
         let active = self.active_nodes();
         let anchors = self.anchors(&active);
         self.sim.setup(&self.g, &active, &self.layout.force, anchors);
@@ -707,7 +796,7 @@ impl Session {
 
     /// Re-run the force problem setup after parameters changed, and warm the simulation up.
     pub fn refresh_sim_if_force(&mut self) {
-        if self.layout.kind == LayoutKind::Force {
+        if self.layout.kind == LayoutKind::Force && !self.coords_active() {
             self.setup_force();
             self.sim.reheat(0.4);
         }
@@ -725,6 +814,10 @@ impl Session {
 
     fn apply_layout_inner(&mut self, animate: bool) {
         self.fit_requested = true;
+        if self.coords_active() {
+            self.apply_coords(); // the nodes sit where their coordinates say
+            return;
+        }
         let active = self.active_nodes();
         if self.layout.kind == LayoutKind::Force {
             self.anim = None;
@@ -875,6 +968,24 @@ impl Session {
     }
 }
 
+// ───────────────────────────── projection ─────────────────────────────
+
+pub enum Projector {
+    Flat { cam: ViewCam, size: V2 },
+    Orbit(Orbit),
+}
+
+impl Projector {
+    /// Screen position, pixels per world unit, and depth (0 in 2D) of node `i`; None if it cannot be seen.
+    #[inline]
+    pub fn at(&self, s: &Session, i: usize) -> Option<(V2, f32, f32)> {
+        match self {
+            Projector::Flat { cam, size } => Some((cam.to_screen(s.pos[i], *size), cam.zoom, 0.0)),
+            Projector::Orbit(o) => o.project(s.pos3[i]),
+        }
+    }
+}
+
 // ───────────────────────────── draw list ─────────────────────────────
 
 /// Colour of highlighted attribute-change connections (Apple's system orange: stands out on both backgrounds).
@@ -888,6 +999,8 @@ pub struct DrawNode {
     pub selected: bool,
     /// Sits on a highlighted attribute change: drawn with an accent ring.
     pub ring: bool,
+    /// Distance from the camera (3D only; 0 in 2D). Far nodes are drawn first.
+    pub depth: f32,
     pub idx: u32,
 }
 
@@ -896,6 +1009,8 @@ pub struct DrawEdge {
     pub b: [f32; 2],
     pub rgba: [u8; 4],
     pub target_r: f32,
+    /// Gets an arrow head (if arrows are on).
+    pub directed: bool,
 }
 
 #[derive(Default)]
@@ -926,8 +1041,21 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         return;
     }
     let dim_hidden = s.look.filtered == FilteredMode::Dim;
-    let screen: Vec<V2> = s.pos.iter().map(|&p| cam.to_screen(p, size)).collect();
-    let radius: Vec<f32> = s.style.node_r.iter().map(|&r| node_radius_px(r, cam.zoom)).collect();
+    let proj = s.projector(cam, size);
+    let pr: Vec<Option<(V2, f32, f32)>> = (0..n).map(|i| proj.at(s, i)).collect();
+    let radius: Vec<f32> = (0..n).map(|i| pr[i].map(|p| node_radius_px(s.style.node_r[i], p.1)).unwrap_or(0.0)).collect();
+    // in 3D, things further away fade a little
+    let threed = s.is_3d();
+    let (mut dmin, mut dmax) = (f32::INFINITY, f32::NEG_INFINITY);
+    if threed {
+        for i in 0..n {
+            if let (true, Some(p)) = (s.vis[i], pr[i]) {
+                dmin = dmin.min(p.2);
+                dmax = dmax.max(p.2);
+            }
+        }
+    }
+    let depth_k = |d: f32, strength: f32| if threed && dmax > dmin { 1.0 - strength * ((d - dmin) / (dmax - dmin)).clamp(0.0, 1.0) } else { 1.0 };
 
     // edges
     let base = s.look.edge_base();
@@ -942,7 +1070,7 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         if !both && !dim_hidden {
             continue;
         }
-        let (pa, pb) = (screen[ai], screen[bi]);
+        let (Some((pa, _, da)), Some((pb, _, db))) = (pr[ai], pr[bi]) else { continue };
         if (pa.x < 0.0 && pb.x < 0.0) || (pa.y < 0.0 && pb.y < 0.0) || (pa.x > size.x && pb.x > size.x) || (pa.y > size.y && pb.y > size.y) {
             continue;
         }
@@ -976,10 +1104,11 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             }
         }
         let c = if top { CHANGE_COLOR } else if uniform { base } else { s.style.edge_rgb.as_ref().unwrap()[e] };
+        alpha *= depth_k((da + db) * 0.5, 0.5);
         if top {
-            alpha = 0.95;
+            alpha = 0.95 * depth_k((da + db) * 0.5, 0.25);
         }
-        let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi] };
+        let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi], directed: g.edge_directed(e) };
         if top { out.edges_hi.push(de) } else if back { out.edges_back.push(de) } else { out.edges.push(de) }
     }
 
@@ -990,7 +1119,7 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         if !visible && !dim_hidden {
             continue;
         }
-        let p = screen[i];
+        let Some((p, _, depth)) = pr[i] else { continue };
         let r = radius[i];
         if p.x < -r || p.y < -r || p.x > size.x + r || p.y > size.y + r {
             continue;
@@ -1017,28 +1146,45 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         if s.sub_info.as_ref().is_some_and(|si| si.connector[i]) {
             alpha = alpha.min(0.6);
         }
-        let dn = DrawNode { x: p.x, y: p.y, r, rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], selected: s.sel[i], ring, idx: i as u32 };
-        if alpha < 1.0 { faded.push(dn) } else { out.nodes.push(dn) }
+        alpha *= depth_k(depth, 0.35);
+        let dn = DrawNode { x: p.x, y: p.y, r, rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], selected: s.sel[i], ring, depth, idx: i as u32 };
+        if alpha < 0.995 { faded.push(dn) } else { out.nodes.push(dn) }
+    }
+    if threed {
+        // painter's order: far to near
+        let far_first = |a: &DrawNode, b: &DrawNode| b.depth.total_cmp(&a.depth);
+        faded.sort_by(far_first);
+        out.nodes.sort_by(far_first);
     }
     faded.append(&mut out.nodes);
     out.nodes = faded;
 }
 
-/// Index of the visible node under `p` (screen space), preferring the top-most (last drawn).
+/// Index of the visible node under `p` (screen space). In 2D the top-most (last drawn) wins, in 3D the nearest.
 pub fn pick_node(s: &Session, cam: &ViewCam, size: V2, p: V2) -> Option<usize> {
-    let mut best: Option<(usize, f32)> = None;
+    let proj = s.projector(cam, size);
+    let mut best: Option<(usize, f32, f32)> = None; // index, pixel distance, depth
     for i in 0..s.g.n() {
         if !s.vis[i] {
             continue;
         }
-        let sp = cam.to_screen(s.pos[i], size);
-        let r = node_radius_px(s.style.node_r[i], cam.zoom).max(4.0) + 2.0;
+        let Some((sp, scale, depth)) = proj.at(s, i) else { continue };
+        let r = node_radius_px(s.style.node_r[i], scale).max(4.0) + 2.0;
         let d = (sp - p).length();
-        if d <= r && best.map(|(_, bd)| d <= bd).unwrap_or(true) {
-            best = Some((i, d));
+        if d > r {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, bd, bdepth)) => {
+                if matches!(proj, Projector::Orbit(_)) { depth < bdepth - 1e-3 || (depth - bdepth).abs() <= 1e-3 && d <= bd } else { d <= bd }
+            }
+        };
+        if better {
+            best = Some((i, d, depth));
         }
     }
-    best.map(|(i, _)| i)
+    best.map(|(i, _, _)| i)
 }
 
 #[cfg(test)]

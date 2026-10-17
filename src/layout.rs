@@ -423,10 +423,14 @@ pub fn hierarchical(g: &Graph, active: &[u32], s: &LayoutSettings, pos: &mut [V2
     let mut out_adj: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut indeg = vec![0u32; n];
     if g.directed {
-        for &(a, b) in &g.edges {
+        for (e, &(a, b)) in g.edges.iter().enumerate() {
             if a != b && in_active[a as usize] && in_active[b as usize] {
                 out_adj[a as usize].push(b);
-                indeg[b as usize] += 1;
+                if g.edge_directed(e) {
+                    indeg[b as usize] += 1;
+                } else {
+                    out_adj[b as usize].push(a); // undirected: usable both ways, and says nothing about roots
+                }
             }
         }
     }

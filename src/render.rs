@@ -62,7 +62,7 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
             }
         }
         if s.g.directed && s.look.arrows {
-            for e in edges {
+            for e in edges.iter().filter(|e| e.directed) {
                 if let Some(t) = arrow_points(e.a, e.b, e.target_r) {
                     let mut pb = PathBuilder::new();
                     pb.move_to(t[0][0], t[0][1]);

@@ -4,6 +4,7 @@ mod app;
 mod canvas;
 mod changes;
 mod config;
+mod coords;
 mod data;
 mod dock;
 mod expr;

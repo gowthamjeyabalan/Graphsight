@@ -101,7 +101,7 @@ pub fn compute(g: &Graph, col: &Column, min_diff: f64, vis: &[bool], pick: &Opti
         }
         info.n_change += 1;
         // directed graphs keep the direction of the edge; undirected ones list each pair once
-        let key = if g.directed || cs <= ct { (cs, ct) } else { (ct, cs) };
+        let key = if g.edge_directed(e) || cs <= ct { (cs, ct) } else { (ct, cs) };
         change_edge[e] = Some(key);
         if use_table {
             *counts.entry(key).or_insert(0) += 1;

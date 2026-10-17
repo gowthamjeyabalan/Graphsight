@@ -10,6 +10,8 @@ pub struct BuildStats {
     pub self_loops: usize,
     pub nodes_from_edges_only: usize,
     pub parallel_edges: usize,
+    /// Rows whose direction column holds something other than directed/undirected.
+    pub unknown_direction: usize,
 }
 
 pub struct Graph {
@@ -18,7 +20,10 @@ pub struct Graph {
     pub edges: Vec<(u32, u32)>,
     pub edge_cols: Vec<Column>,
     pub node_cols: Vec<Column>,
+    /// True if at least one edge is directed (arrows, in/out degree, directed layouts).
     pub directed: bool,
+    /// Per edge: directed (source → target) or undirected.
+    pub edge_dir: Vec<bool>,
     /// Index into `edge_cols` of the mapped weight column.
     pub weight_col: Option<usize>,
     /// Undirected, de-duplicated adjacency without self loops (CSR).
@@ -36,6 +41,7 @@ impl Default for Graph {
             edge_cols: vec![],
             node_cols: vec![],
             directed: false,
+            edge_dir: vec![],
             weight_col: None,
             adj_off: vec![0],
             adj: vec![],
@@ -57,6 +63,11 @@ impl Graph {
     #[inline]
     pub fn degree(&self, i: usize) -> usize {
         (self.adj_off[i + 1] - self.adj_off[i]) as usize
+    }
+
+    #[inline]
+    pub fn edge_directed(&self, e: usize) -> bool {
+        self.edge_dir.get(e).copied().unwrap_or(self.directed)
     }
 
     pub fn node_col(&self, name: &str) -> Option<&Column> {
@@ -131,7 +142,6 @@ pub fn build_graph(
 
     let mut kept_edge_rows: Vec<usize> = Vec::new();
     if let Some((t, m)) = edges {
-        g.directed = m.directed;
         for (ri, row) in t.rows.iter().enumerate() {
             let (s, d) = (row[m.src].trim(), row[m.dst].trim());
             if s.is_empty() || d.is_empty() {
@@ -146,13 +156,27 @@ pub fn build_graph(
             if si == di {
                 stats.self_loops += 1;
             }
+            let dir = match m.dir_col.and_then(|c| row.get(c)) {
+                Some(v) => match parse_direction(v) {
+                    Some(d) => d,
+                    None => {
+                        if !v.trim().is_empty() {
+                            stats.unknown_direction += 1;
+                        }
+                        m.directed
+                    }
+                },
+                None => m.directed,
+            };
             g.edges.push((si, di));
+            g.edge_dir.push(dir);
             kept_edge_rows.push(ri);
         }
+        g.directed = g.edge_dir.iter().any(|d| *d);
         // parallel edges
         let mut seen = std::collections::HashSet::with_capacity(g.edges.len());
-        for &(s, t) in &g.edges {
-            let key = if m.directed { (s, t) } else { (s.min(t), s.max(t)) };
+        for (e, &(s, t)) in g.edges.iter().enumerate() {
+            let key = if g.edge_dir[e] { (s, t) } else { (s.min(t), s.max(t)) };
             if !seen.insert(key) {
                 stats.parallel_edges += 1;
             }
@@ -241,12 +265,12 @@ fn pagerank(g: &Graph) -> Vec<f64> {
     // directed: follow edge direction; undirected: both ways (counts parallel edges)
     let mut out_off = vec![0usize; n + 1];
     let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(g.edges.len() * 2);
-    for &(s, t) in &g.edges {
+    for (e, &(s, t)) in g.edges.iter().enumerate() {
         if s == t {
             continue;
         }
         pairs.push((s, t));
-        if !g.directed {
+        if !g.edge_directed(e) {
             pairs.push((t, s));
         }
     }
@@ -474,7 +498,7 @@ pub fn compute_metrics(g: &mut Graph) {
     let mut deg = vec![0f64; n];
     let mut indeg = vec![0f64; n];
     let mut outdeg = vec![0f64; n];
-    for &(s, t) in &g.edges {
+    for (e, &(s, t)) in g.edges.iter().enumerate() {
         if s == t {
             continue;
         }
@@ -482,6 +506,11 @@ pub fn compute_metrics(g: &mut Graph) {
         deg[t as usize] += 1.0;
         outdeg[s as usize] += 1.0;
         indeg[t as usize] += 1.0;
+        if !g.edge_directed(e) {
+            // an undirected edge leaves and enters both of its ends
+            outdeg[t as usize] += 1.0;
+            indeg[s as usize] += 1.0;
+        }
     }
     let add = |g: &mut Graph, name: &str, v: Vec<f64>, hint_cat: bool| {
         let mut c = Column::numeric(name, v);
@@ -578,5 +607,35 @@ pub mod tests {
         assert_eq!(c.num(g.index["2"] as usize), a);
         assert_eq!(c.num(g.index["7"] as usize), b);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn per_edge_direction_column() {
+        let e = parse_csv_text("source,target,direction\na,b,directed\nb,c,undirected\nc,d,Directed\nd,a,\ne,a,sideways\nf,g,directed\ng,h,undirected\n").unwrap();
+        let m = auto_edge_mapping(&e);
+        assert_eq!(m.dir_col, Some(2), "found by its name although one value is a typo");
+        let g = build_graph(Some((&e, &m)), None);
+        assert_eq!(g.edge_dir, vec![true, false, true, false, false, true, false]);
+        assert!(g.directed);
+        assert_eq!(g.stats.unknown_direction, 1, "empty is silently the default, 'sideways' is reported");
+        // degrees: b has in 1 (a→b) + undirected b-c counts both ways
+        let ind = g.node_col("_in_degree").unwrap();
+        let outd = g.node_col("_out_degree").unwrap();
+        let (b, c) = (g.index["b"] as usize, g.index["c"] as usize);
+        assert_eq!((ind.num(b), outd.num(b)), (Some(2.0), Some(1.0)));
+        assert_eq!((ind.num(c), outd.num(c)), (Some(1.0), Some(2.0)));
+        let mut all_undirected = m.clone();
+        all_undirected.dir_col = None;
+        assert!(!build_graph(Some((&e, &all_undirected)), None).directed);
+    }
+
+    #[test]
+    fn direction_column_is_found_by_its_words_even_with_another_name() {
+        let e = parse_csv_text("source,target,kind\na,b,directed\nb,c,undirected\n").unwrap();
+        assert_eq!(auto_edge_mapping(&e).dir_col, Some(2));
+        let plain = parse_csv_text("source,target,kind\na,b,family\nb,c,work\n").unwrap();
+        assert_eq!(auto_edge_mapping(&plain).dir_col, None);
+        let flags = parse_csv_text("source,target,mark\na,b,1\nb,c,0\n").unwrap();
+        assert_eq!(auto_edge_mapping(&flags).dir_col, None, "a bare 0/1 column is not guessed");
     }
 }
