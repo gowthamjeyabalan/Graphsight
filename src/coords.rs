@@ -174,6 +174,8 @@ pub struct Orbit {
     pub fwd: V3,
     pub focal: f32,
     pub size: V2,
+    /// Nearest distance in front of the camera that is drawn (for clipping boxes that reach past the camera).
+    pub near: f32,
 }
 
 impl Cam3 {
@@ -192,7 +194,7 @@ impl Cam3 {
         let right = norm(cross(fwd, [0.0, 0.0, 1.0]));
         let up = cross(right, fwd);
         let focal = (size.x.min(size.y) * 0.5) / (FOV * 0.5).tan();
-        Orbit { eye, right, up, fwd, focal, size }
+        Orbit { eye, right, up, fwd, focal, size, near: (self.dist * 0.02).max(1e-3) }
     }
 
     /// Look from a fixed direction. `Top` looks straight down (x right, y up).
@@ -249,6 +251,57 @@ impl Orbit {
         }
         let f = self.focal / cz;
         Some((V2::new(self.size.x * 0.5 + dot(d, self.right) * f, self.size.y * 0.5 - dot(d, self.up) * f), f, cz))
+    }
+
+    /// Camera-space coordinates of a world point: right, up, forward.
+    #[inline]
+    fn to_cam(&self, p: V3) -> V3 {
+        let d = sub(p, self.eye);
+        [dot(d, self.right), dot(d, self.up), dot(d, self.fwd)]
+    }
+
+    #[inline]
+    fn cam_to_screen(&self, c: V3) -> V2 {
+        let f = self.focal / c[2];
+        V2::new(self.size.x * 0.5 + c[0] * f, self.size.y * 0.5 - c[1] * f)
+    }
+
+    /// A flat polygon (at most 4 corners) cut off at the near plane, as screen points. Returns the points and how
+    /// many there are; 0 means nothing of it is in front of the camera.
+    pub fn clip_polygon(&self, pts: &[V3]) -> ([V2; 8], usize) {
+        let mut out = [V2::ZERO; 8];
+        let mut n = 0;
+        let k = pts.len();
+        for i in 0..k {
+            let a = self.to_cam(pts[i]);
+            let b = self.to_cam(pts[(i + 1) % k]);
+            let (a_in, b_in) = (a[2] >= self.near, b[2] >= self.near);
+            if a_in {
+                out[n] = self.cam_to_screen(a);
+                n += 1;
+            }
+            if a_in != b_in {
+                let t = (self.near - a[2]) / (b[2] - a[2]);
+                out[n] = self.cam_to_screen([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, self.near]);
+                n += 1;
+            }
+        }
+        (out, n)
+    }
+
+    /// A line segment cut off at the near plane, as screen points. None if it is entirely behind the camera.
+    pub fn clip_segment(&self, p: V3, q: V3) -> Option<(V2, V2)> {
+        let (mut a, mut b) = (self.to_cam(p), self.to_cam(q));
+        let (a_in, b_in) = (a[2] >= self.near, b[2] >= self.near);
+        if !a_in && !b_in {
+            return None;
+        }
+        if a_in != b_in {
+            let t = (self.near - a[2]) / (b[2] - a[2]);
+            let m = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, self.near];
+            if a_in { b = m } else { a = m }
+        }
+        Some((self.cam_to_screen(a), self.cam_to_screen(b)))
     }
 
     /// Screen offset of a unit step along a world axis (for the axes gizmo): (right, up) components.
@@ -434,5 +487,28 @@ mod tests {
         let s = session("a,0,0,0,p\nb,1,1,1,p\nc,2,2,2,q\nd,3,3,3,q\n");
         assert!(!s.is_3d());
         assert!(matches!(s.projector(&ViewCam::default(), V2::new(100.0, 100.0)), Projector::Flat { .. }));
+    }
+
+    #[test]
+    fn clipping_cuts_at_the_near_plane() {
+        let size = V2::new(800.0, 600.0);
+        let cam = Cam3 { target: [0.0; 3], yaw: 0.0, pitch: 0.0, dist: 100.0 };
+        let o = cam.orbit(size);
+        // the camera looks along +y from y = -100; near is 2 units in front of it
+        assert!((o.near - 2.0).abs() < 1e-4);
+        // a segment entirely in front is untouched; one entirely behind is gone
+        assert!(o.clip_segment([0.0, 0.0, 0.0], [10.0, 0.0, 0.0]).is_some());
+        assert!(o.clip_segment([0.0, -300.0, 0.0], [10.0, -200.0, 0.0]).is_none());
+        // a segment running from far behind to far in front is cut to the near plane: finite, and on screen centre line
+        let (a, b) = o.clip_segment([0.0, -500.0, 0.0], [0.0, 500.0, 0.0]).unwrap();
+        assert!(a.x.is_finite() && b.x.is_finite() && (a.x - 400.0).abs() < 1e-3 && (b.x - 400.0).abs() < 1e-3);
+        // a square that reaches behind the camera loses the corners there and gains cut points: no more than 5
+        let quad = [[-50.0, -500.0, -50.0], [50.0, -500.0, -50.0], [50.0, 0.0, -50.0], [-50.0, 0.0, -50.0]];
+        let (pts, n) = o.clip_polygon(&quad);
+        assert!((3..=5).contains(&n), "{n}");
+        assert!(pts[..n].iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+        // a polygon wholly in front keeps its corners; one wholly behind has none
+        assert_eq!(o.clip_polygon(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0]]).1, 3);
+        assert_eq!(o.clip_polygon(&[[0.0, -400.0, 0.0], [1.0, -400.0, 0.0], [1.0, -400.0, 1.0]]).1, 0);
     }
 }

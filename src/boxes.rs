@@ -77,6 +77,9 @@ pub struct BoxInfo {
     pub n_boxes: usize,
     /// Matching nodes with a missing or unreadable value in one of the six columns (no box).
     pub n_incomplete: usize,
+    /// Boxes that lie far outside the cloud of nodes (placeholder values, a site outline, another datum). The
+    /// camera ignores them when it frames the view.
+    pub n_far: usize,
 }
 
 /// Work out the boxes for the nodes that match the rule. `xf` is the transform the node positions use.
@@ -247,7 +250,7 @@ mod tests {
         let st = settings(&s);
         let xf = coords::place(&s.g, &s.coords).unwrap().xform;
         let (items, info) = compute(&s.g, &xf, &st);
-        assert_eq!(info, BoxInfo { n_match: 4, n_boxes: 3, n_incomplete: 1 });
+        assert_eq!(info, BoxInfo { n_match: 4, n_boxes: 3, n_incomplete: 1, n_far: 0 });
         let a = s.g.index["a"] as usize;
         let ia = items.iter().find(|b| b.node as usize == a).unwrap();
         // a's box runs −1..1 in x and y around the node, so its centre in x and y is the node's position
@@ -440,5 +443,178 @@ mod tests {
         // an old session file without box settings still loads
         let old: BoxSettings = serde_json::from_str("{}").unwrap();
         assert!(!old.enabled && old.show_nodes);
+    }
+
+    /// Many small boxes plus a few very large ones (a site, a floor slab): the small ones must still be drawn.
+    fn crowded(n_small: usize, n_big: usize) -> Session {
+        let mut nodes = String::from("id,x,y,z,kind,bx0,by0,bz0,bx1,by1,bz1\n");
+        let mut edges = String::from("source,target\n");
+        for i in 0..n_small {
+            let (x, y, z) = ((i % 30) as f64 * 4.0, ((i / 30) % 30) as f64 * 4.0, (i / 900) as f64 * 4.0);
+            nodes += &format!("r{i},{x},{y},{z},room,{},{},{},{},{},{}\n", x - 1.5, y - 1.5, z, x + 1.5, y + 1.5, z + 3.0);
+            if i > 0 {
+                edges += &format!("r{},r{i}\n", i - 1);
+            }
+        }
+        for k in 0..n_big {
+            let (x, y, z) = (60.0 + k as f64, 60.0, 0.0);
+            nodes += &format!("big{k},{x},{y},{z},site,-3000,-3000,-500,3000,3000,500\n");
+            edges += &format!("r0,big{k}\n");
+        }
+        let e = parse_csv_text(&edges).unwrap();
+        let n = parse_csv_text(&nodes).unwrap();
+        let mut s = Session::new();
+        s.set_edges("e".into(), e.clone(), auto_edge_mapping(&e));
+        s.set_nodes("n".into(), n.clone(), auto_node_mapping(&n));
+        s.rebuild();
+        s
+    }
+
+    fn on_screen(s: &Session) -> (usize, usize) {
+        let dl = shown(s);
+        let size = egui::Vec2::new(800.0, 600.0);
+        let small = dl
+            .boxes
+            .iter()
+            .filter(|b| {
+                let pts: Vec<[f32; 2]> = b.polygons().flatten().copied().collect();
+                let (x0, x1) = pts.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p[0]), a.1.max(p[0])));
+                let (y0, y1) = pts.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p[1]), a.1.max(p[1])));
+                let (w, h) = (x1 - x0, y1 - y0);
+                w >= 4.0 && h >= 4.0 && w < size.x * 0.5 && h < size.y * 0.5 && x0 >= 0.0 && x1 <= size.x && y0 >= 0.0 && y1 <= size.y
+            })
+            .count();
+        (dl.boxes.len(), small)
+    }
+
+    #[test]
+    fn small_boxes_survive_next_to_huge_ones() {
+        for big in [0usize, 3, 8, 20] {
+            let mut s = crowded(700, big);
+            s.coords = CoordSettings { enabled: true, x: Some("x".into()), y: Some("y".into()), z: Some("z".into()), three_d: true, ..Default::default() };
+            s.apply_coords();
+            let name = |x: &str| Some(x.to_string());
+            s.boxes = BoxSettings { enabled: true, min: [name("bx0"), name("by0"), name("bz0")], max: [name("bx1"), name("by1"), name("bz1")], ..Default::default() };
+            s.recompute_boxes();
+            s.fit_cam3();
+            let (total, small) = on_screen(&s);
+            eprintln!("big={big}: boxes={} drawn={total} small-and-on-screen={small} dist={}", s.box_items.len(), s.cam3.dist);
+            assert!(small >= 600, "big={big}: only {small} of 700 small boxes are visible ({total} drawn)");
+        }
+    }
+
+    /// A few nodes with absurd box values (a placeholder such as 99999 or -9999) must not ruin the view of the rest.
+    #[test]
+    fn placeholder_values_do_not_hide_the_other_boxes() {
+        for (bad, value) in [(1usize, 99999.0), (4, -9999.0), (12, 1e9), (30, 1e6)] {
+            let mut s = crowded(700, 0);
+            // overwrite the boxes of the first `bad` nodes
+            let mut text = String::from("id,x,y,z,kind,bx0,by0,bz0,bx1,by1,bz1\n");
+            for i in 0..700usize {
+                let (x, y, z) = ((i % 30) as f64 * 4.0, ((i / 30) % 30) as f64 * 4.0, (i / 900) as f64 * 4.0);
+                if i < bad {
+                    text += &format!("r{i},{x},{y},{z},room,{value},{value},{value},{},{},{}\n", value + 5.0, value + 5.0, value + 5.0);
+                } else {
+                    text += &format!("r{i},{x},{y},{z},room,{},{},{},{},{},{}\n", x - 1.5, y - 1.5, z, x + 1.5, y + 1.5, z + 3.0);
+                }
+            }
+            let n = parse_csv_text(&text).unwrap();
+            s.set_nodes("n".into(), n.clone(), auto_node_mapping(&n));
+            s.rebuild();
+            s.coords = CoordSettings { enabled: true, x: Some("x".into()), y: Some("y".into()), z: Some("z".into()), three_d: true, ..Default::default() };
+            s.apply_coords();
+            let name = |x: &str| Some(x.to_string());
+            s.boxes = BoxSettings { enabled: true, min: [name("bx0"), name("by0"), name("bz0")], max: [name("bx1"), name("by1"), name("bz1")], ..Default::default() };
+            s.recompute_boxes();
+            s.fit_cam3();
+            let (total, small) = on_screen(&s);
+            eprintln!("bad={bad} value={value}: drawn={total} readable-on-screen={small} dist={}", s.cam3.dist);
+            assert!(small >= 690 - bad, "{bad} boxes at {value}: only {small} of the normal boxes can be seen");
+        }
+    }
+
+    fn set_up(s: &mut Session, boxcols: [&str; 6]) {
+        s.coords = CoordSettings { enabled: true, x: Some("x".into()), y: Some("y".into()), z: Some("z".into()), three_d: true, ..Default::default() };
+        s.apply_coords();
+        let n = |i: usize| Some(boxcols[i].to_string());
+        s.boxes = BoxSettings { enabled: true, min: [n(0), n(1), n(2)], max: [n(3), n(4), n(5)], ..Default::default() };
+        s.recompute_boxes();
+        s.fit_cam3();
+    }
+
+    fn session_from(nodes: &str) -> Session {
+        let ids: Vec<&str> = nodes.lines().skip(1).map(|l| l.split(',').next().unwrap()).collect();
+        let mut edges = String::from("source,target\n");
+        for w in ids.windows(2) {
+            edges += &format!("{},{}\n", w[0], w[1]);
+        }
+        let e = parse_csv_text(&edges).unwrap();
+        let n = parse_csv_text(nodes).unwrap();
+        let mut s = Session::new();
+        s.set_edges("e".into(), e.clone(), auto_edge_mapping(&e));
+        s.set_nodes("n".into(), n.clone(), auto_node_mapping(&n));
+        s.rebuild();
+        s
+    }
+
+    const COLS: [&str; 6] = ["x0", "y0", "z0", "x1", "y1", "z1"];
+
+    #[test]
+    fn real_world_coordinates_with_large_values() {
+        // coordinates like a national grid: hundreds of thousands, boxes of 216 x 103 x 75 and smaller ones
+        let mut text = String::from("id,x,y,z,x0,y0,z0,x1,y1,z1\n");
+        for i in 0..200usize {
+            let (x, y, z) = (279500.0 + (i % 20) as f64 * 40.0, 201300.0 + (i / 20) as f64 * 40.0, 22500.0 + (i % 3) as f64 * 30.0);
+            let (w, d, h) = if i % 10 == 0 { (216.0, 102.8, 75.15) } else { (20.0, 12.0, 8.0) };
+            text += &format!("n{i},{x},{y},{z},{},{},{},{},{},{}\n", x - w / 2.0, y - d / 2.0, z - h / 2.0, x + w / 2.0, y + d / 2.0, z + h / 2.0);
+        }
+        let mut s = session_from(&text);
+        set_up(&mut s, COLS);
+        assert_eq!(s.box_info.n_boxes, 200);
+        assert_eq!(s.box_info.n_far, 0);
+        let (total, readable) = on_screen(&s);
+        assert_eq!(total, 200);
+        assert!(readable >= 150, "{readable} of 200 boxes are readable");
+    }
+
+    #[test]
+    fn boxes_in_another_origin_are_still_shown_and_reported() {
+        // the nodes use a local frame (0..300) while the boxes use the grid values of the sample row
+        let mut text = String::from("id,x,y,z,x0,y0,z0,x1,y1,z1\n");
+        for i in 0..100usize {
+            let (x, y, z) = ((i % 10) as f64 * 30.0, (i / 10) as f64 * 30.0, (i % 4) as f64 * 20.0);
+            let (gx, gy, gz) = (279530.4 + x, 201373.4 + y, 22511.28 + z);
+            text += &format!("n{i},{x},{y},{z},{gx},{gy},{gz},{},{},{}\n", gx + 216.0, gy + 102.8, gz + 75.15);
+        }
+        let mut s = session_from(&text);
+        set_up(&mut s, COLS);
+        assert_eq!(s.box_info.n_boxes, 100);
+        assert_eq!(s.box_info.n_far, 100, "none of the boxes is near the nodes");
+        let (total, readable) = on_screen(&s);
+        assert_eq!(total, 100);
+        assert!(readable >= 90, "the boxes are framed even though they sit elsewhere: {readable} readable");
+    }
+
+    #[test]
+    fn a_box_around_the_camera_is_clipped_not_dropped() {
+        let mut s = session();
+        on(&mut s);
+        s.boxes = settings(&s);
+        s.recompute_boxes();
+        // put the camera inside the first box, looking along it
+        let b = s.box_items[0];
+        s.cam3.target = [(b.lo[0] + b.hi[0]) * 0.5, (b.lo[1] + b.hi[1]) * 0.5, (b.lo[2] + b.hi[2]) * 0.5];
+        s.cam3.dist = 0.2;
+        s.cam3.yaw = 0.7;
+        let dl = shown(&s);
+        let inside = dl.boxes.iter().find(|d| d.lines().count() > 0 && d.depth < 1.0).expect("the box around the camera is still drawn");
+        for (p, q, _) in inside.lines() {
+            assert!(p.iter().chain(q.iter()).all(|v| v.is_finite()));
+        }
+        assert!(inside.polygons().all(|poly| poly.iter().all(|p| p[0].is_finite() && p[1].is_finite())));
+        // nothing is drawn for a box entirely behind the camera
+        s.cam3.target = [1.0e5, 1.0e5, 1.0e5];
+        s.cam3.dist = 5.0;
+        assert!(shown(&s).boxes.is_empty());
     }
 }

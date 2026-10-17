@@ -992,6 +992,11 @@ impl App {
 
 // ───────────────────────── bounding boxes ─────────────────────────
 
+/// A number for a short label: no needless decimals.
+fn fmt_num(v: f64) -> String {
+    if v.abs() >= 1000.0 { format!("{v:.0}") } else if v.abs() >= 10.0 { format!("{v:.1}") } else { format!("{v:.2}") }
+}
+
 impl App {
     /// "Bounding boxes" block in the Layout tab, shown while the 3D view is on.
     fn boxes_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
@@ -1093,6 +1098,27 @@ impl App {
                     ui.weak("No boxes to draw: no matching node has all six values.");
                 } else {
                     ui.label(crate::theme::secondary(plural(info.n_boxes, "box drawn", "boxes drawn")));
+                }
+                if info.n_far > 0 {
+                    if info.n_far * 2 >= info.n_boxes {
+                        ui.label(crate::theme::secondary("Most boxes lie away from the nodes. Check that the box columns use the same units and origin as the X, Y, Z columns:"));
+                        let g = &self.s.g;
+                        let range = |names: [&Option<String>; 2]| -> Option<(f64, f64)> {
+                            let lo = g.node_col(names[0].as_deref()?)?.num_range()?.0;
+                            let hi = g.node_col(names[1].as_deref()?)?.num_range()?.1;
+                            Some((lo, hi))
+                        };
+                        let node_range = |c: &Option<String>| c.as_deref().and_then(|c| g.node_col(c)).and_then(|c| c.num_range());
+                        for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                            let coords = [&self.s.coords.x, &self.s.coords.y, &self.s.coords.z][k];
+                            if let (Some(n), Some(b)) = (node_range(coords), range([&self.s.boxes.min[k], &self.s.boxes.max[k]])) {
+                                ui.label(crate::theme::secondary(format!("{axis}: nodes {} to {}, boxes {} to {}", fmt_num(n.0), fmt_num(n.1), fmt_num(b.0), fmt_num(b.1))));
+                            }
+                        }
+                    } else {
+                        let some = plural(info.n_far, "box lies", "boxes lie");
+                        ui.label(crate::theme::secondary(format!("{some} far outside the nodes (check their values); the camera ignores them when framing")));
+                    }
                 }
                 if info.n_incomplete > 0 {
                     let who = plural(info.n_incomplete, "matching node has", "matching nodes have");

@@ -93,7 +93,9 @@ coordinates; columns named like `bbox_min_x` or `xmin` are found for you) and sw
 attribute and tick its values to draw boxes only for those nodes, for example every `room` but no `hall`. Boxes can be
 one colour or take their node's colour (so *Colour by* in Appearance colours them too), with sliders for fill opacity,
 outline opacity and outline width, and a switch to hide the nodes and edges so only the boxes show. Boxes follow the
-filters and the selected node's box is highlighted. They are also drawn in PNG and SVG exports, and the settings are
+filters and the selected node's box is highlighted. Boxes that lie far outside the nodes (placeholder values such as
+-9999, a site outline) are counted in the panel and ignored when the camera frames the view; a box much bigger than the
+view is drawn as an outline only. They are also drawn in PNG and SVG exports, and the settings are
 saved in the session.
 
 **Directed and undirected edges** — if the edges file has a column saying `directed` / `undirected` for each edge
