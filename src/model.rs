@@ -1,19 +1,22 @@
 //! The session: loaded data, graph, layout state, appearance, filters, selection.
 //! Free of any GUI toolkit so it can also drive the headless exporter and the tests.
 
+use crate::changes::{self, ChangeInfo, ChangeSettings};
 use crate::data::*;
 use crate::expr;
 use crate::graph::{Graph, build_graph};
 use crate::layout::*;
 use crate::style::*;
+use crate::subgraph::{self, SubInfo, SubSettings};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use egui::Vec2 as V2;
 use std::collections::HashMap;
 use std::path::Path;
 
 // ───────────────────────────── appearance ─────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum EdgeColorMode {
     Uniform,
     Source,
@@ -21,19 +24,20 @@ pub enum EdgeColorMode {
     Attribute,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LabelMode {
     Auto,
     Never,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FilteredMode {
     Hide,
     Dim,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Look {
     pub color_by: Option<String>,
     /// Treat a numeric column as categories (colour per distinct value).
@@ -220,14 +224,14 @@ pub fn compute_style(g: &Graph, look: &Look) -> StyleCache {
 
 // ───────────────────────────── filters ─────────────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RuleKind {
     Range { lo: f64, hi: f64, keep_missing: bool },
     /// One flag per category label plus a final flag for "(empty)".
     Cats { allowed: Vec<bool> },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Rule {
     pub enabled: bool,
     pub col: String,
@@ -246,7 +250,8 @@ impl Rule {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FilterState {
     pub rules: Vec<Rule>,
     pub expr_text: String,
@@ -265,7 +270,7 @@ fn contains_ci(hay: &str, needle_lower: &str) -> bool {
 
 // ───────────────────────────── camera ─────────────────────────────
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ViewCam {
     /// World point shown at the centre of the view.
     pub center: V2,
@@ -299,6 +304,8 @@ pub fn node_radius_px(r_world: f32, zoom: f32) -> f32 {
 
 pub struct TableSrc<M> {
     pub name: String,
+    /// File the table was read from (None for the built-in sample).
+    pub path: Option<std::path::PathBuf>,
     pub table: RawTable,
     pub mapping: M,
 }
@@ -319,6 +326,12 @@ pub struct Session {
     pub sim: ForceSim,
     pub look: Look,
     pub filter: FilterState,
+    pub change: ChangeSettings,
+    pub change_info: Option<ChangeInfo>,
+    pub sub: SubSettings,
+    pub sub_info: Option<SubInfo>,
+    /// Node positions from before the sub-graph was shown, put back when it is switched off.
+    sub_saved_pos: Option<Vec<V2>>,
     pub expr_error: Option<String>,
     pub vis: Vec<bool>,
     pub manual_hidden: Vec<bool>,
@@ -344,6 +357,11 @@ impl Default for Session {
             sim: ForceSim::new(),
             look: Look::default(),
             filter: FilterState::default(),
+            change: ChangeSettings::default(),
+            change_info: None,
+            sub: SubSettings::default(),
+            sub_info: None,
+            sub_saved_pos: None,
             expr_error: None,
             vis: vec![],
             manual_hidden: vec![],
@@ -367,11 +385,11 @@ impl Session {
     // ── loading ──
 
     pub fn set_edges(&mut self, name: String, table: RawTable, mapping: EdgeMapping) {
-        self.edge_src = Some(TableSrc { name, table, mapping });
+        self.edge_src = Some(TableSrc { name, path: None, table, mapping });
     }
 
     pub fn set_nodes(&mut self, name: String, table: RawTable, mapping: NodeMapping) {
-        self.node_src = Some(TableSrc { name, table, mapping });
+        self.node_src = Some(TableSrc { name, path: None, table, mapping });
     }
 
     pub fn load_json(&mut self, path: &Path) -> Result<()> {
@@ -380,9 +398,12 @@ impl Session {
         let mut em = auto_edge_mapping(&j.edges);
         em.directed = j.directed.unwrap_or(false);
         self.set_edges(fname.clone(), j.edges, em);
+        if let Some(e) = &mut self.edge_src {
+            e.path = Some(path.to_path_buf());
+        }
         self.node_src = j.nodes.map(|t| {
             let m = auto_node_mapping(&t);
-            TableSrc { name: fname.clone(), table: t, mapping: m }
+            TableSrc { name: fname.clone(), path: Some(path.to_path_buf()), table: t, mapping: m }
         });
         self.preset = j.positions;
         Ok(())
@@ -459,6 +480,15 @@ impl Session {
             }
         }
         self.filter.rules.retain(|r| self.g.node_col(&r.col).is_some());
+        if self.change.col.as_ref().is_some_and(|c| self.g.node_col(c).is_none()) {
+            self.change.col = None;
+            self.change.pick = None;
+        }
+        if self.sub.rule.as_ref().is_some_and(|r| self.g.node_col(&r.col).is_none()) {
+            self.sub.rule = None;
+        }
+        self.sub_saved_pos = None;
+        self.recompute_subgraph();
         self.recompute_visibility();
         self.recompute_style();
         if first_time {
@@ -479,32 +509,15 @@ impl Session {
         let n = g.n();
         let mut vis: Vec<bool> = self.manual_hidden.iter().map(|h| !h).collect();
         vis.resize(n, true);
-        for r in self.filter.rules.iter().filter(|r| r.enabled) {
-            let Some(col) = g.node_col(&r.col) else { continue };
-            match &r.kind {
-                RuleKind::Range { lo, hi, keep_missing } => {
-                    if !col.is_numeric() {
-                        continue;
-                    }
-                    for i in 0..n {
-                        let ok = match col.num(i) {
-                            Some(v) => v >= *lo && v <= *hi,
-                            None => *keep_missing,
-                        };
-                        vis[i] &= ok;
-                    }
-                }
-                RuleKind::Cats { allowed } => {
-                    let (codes, labels) = col.as_categories();
-                    if allowed.len() != labels.len() + 1 {
-                        continue;
-                    }
-                    for i in 0..n {
-                        let k = if codes[i] == NULL_CODE { labels.len() } else { codes[i] as usize };
-                        vis[i] &= allowed[k];
-                    }
+        if let Some(si) = &self.sub_info {
+            if si.member.len() == n {
+                for i in 0..n {
+                    vis[i] &= si.member[i];
                 }
             }
+        }
+        for r in self.filter.rules.iter().filter(|r| r.enabled) {
+            subgraph::rule_pass(g, r, &mut vis);
         }
         match expr::compile(&self.filter.expr_text, g) {
             Ok(Some(c)) => {
@@ -534,6 +547,59 @@ impl Session {
         self.n_vis = vis.iter().filter(|v| **v).count();
         self.n_vis_edges = g.edges.iter().filter(|&&(s, t)| vis[s as usize] && vis[t as usize]).count();
         self.vis = vis;
+        self.recompute_changes();
+    }
+
+    /// Re-find the connections where the chosen attribute changes (also after any filter change,
+    /// because only visible connections are compared).
+    pub fn recompute_changes(&mut self) {
+        let info = if self.change.enabled {
+            self.change
+                .col
+                .as_deref()
+                .and_then(|c| self.g.node_col(c))
+                .map(|col| changes::compute(&self.g, col, self.change.min_diff, &self.vis, &self.change.pick, self.change.only && self.change.connect))
+        } else {
+            None
+        };
+        self.change_info = info;
+    }
+
+    /// Work out which nodes belong to the sub-graph (from the settings; needs the whole graph, so it is
+    /// cached and not redone when only the filter changes).
+    pub fn recompute_subgraph(&mut self) {
+        self.sub_info = match (&self.sub.rule, self.sub.enabled) {
+            (Some(rule), true) if self.g.node_col(&rule.col).is_some() => {
+                let info = subgraph::compute(&self.g, rule, self.sub.hops, self.sub.connect);
+                // a rule nothing matches would leave an empty canvas: show the whole graph instead
+                if info.n_match == 0 { Some(SubInfo { member: vec![true; self.g.n()], connector: vec![false; self.g.n()], ..info }) } else { Some(info) }
+            }
+            _ => None,
+        };
+    }
+
+    /// True while a sub-graph is being shown (a rule that matches nothing does not count).
+    pub fn sub_active(&self) -> bool {
+        self.sub_info.as_ref().is_some_and(|i| i.n_match > 0)
+    }
+
+    /// Apply the sub-graph settings: recompute, lay the visible part out afresh, or bring the full layout back.
+    pub fn apply_subgraph(&mut self) {
+        if self.sub.enabled && self.sub_saved_pos.is_none() && self.sub.rule.is_some() {
+            self.sub_saved_pos = Some(self.pos.clone());
+        }
+        self.recompute_subgraph();
+        self.recompute_visibility();
+        if self.sub_active() {
+            self.apply_layout();
+        } else if let Some(p) = self.sub_saved_pos.take() {
+            if p.len() == self.pos.len() {
+                self.pos = p;
+            }
+            self.anim = None;
+            self.fit_requested = true;
+            self.refresh_sim_if_force();
+        }
     }
 
     pub fn recompute_style(&mut self) {
@@ -621,7 +687,7 @@ impl Session {
     // ── layout ──
 
     pub fn active_nodes(&self) -> Vec<u32> {
-        if self.layout.visible_only {
+        if self.layout.visible_only || self.sub_active() {
             (0..self.g.n() as u32).filter(|&i| self.vis[i as usize]).collect()
         } else {
             (0..self.g.n() as u32).collect()
@@ -674,6 +740,66 @@ impl Session {
         } else {
             self.pos = target;
             self.anim = None;
+        }
+    }
+
+    /// Put the session back into a saved state: positions, pins, selection and hand-hidden nodes by id.
+    pub fn restore_state(&mut self, positions: &[(String, f32, f32)], pinned: &[String], selected: &[String], hidden: &[String]) {
+        let n = self.g.n();
+        for (id, x, y) in positions {
+            if let Some(&i) = self.g.index.get(id) {
+                self.pos[i as usize] = V2::new(*x, *y);
+            }
+        }
+        self.anim = None;
+        self.sim.running = false;
+        self.fit_requested = false;
+        self.sim.pinned = vec![false; n];
+        for id in pinned {
+            if let Some(&i) = self.g.index.get(id) {
+                self.sim.pinned[i as usize] = true;
+            }
+        }
+        for id in hidden {
+            if let Some(&i) = self.g.index.get(id) {
+                self.manual_hidden[i as usize] = true;
+            }
+        }
+        for id in selected {
+            if let Some(&i) = self.g.index.get(id) {
+                self.set_selected(i as usize, true);
+            }
+        }
+    }
+
+    /// Forget settings that refer to columns the (possibly changed) files no longer have.
+    pub fn drop_missing_columns(&mut self) {
+        let g = &self.g;
+        let miss = |c: &Option<String>| c.as_ref().is_some_and(|c| g.node_col(c).is_none());
+        if miss(&self.look.color_by) {
+            self.look.color_by = None;
+        }
+        if miss(&self.look.size_by) {
+            self.look.size_by = None;
+        }
+        if miss(&self.look.label_by) {
+            self.look.label_by = None;
+        }
+        if self.look.edge_by.as_ref().is_some_and(|e| g.edge_col(e).is_none()) {
+            self.look.edge_by = None;
+        }
+        for c in [&mut self.layout.order_by, &mut self.layout.ring_by, &mut self.layout.group_by, &mut self.layout.x_by, &mut self.layout.y_by] {
+            if miss(c) {
+                *c = None;
+            }
+        }
+        self.filter.rules.retain(|r| g.node_col(&r.col).is_some());
+        if self.change.col.as_ref().is_some_and(|c| g.node_col(c).is_none()) {
+            self.change.col = None;
+            self.change.pick = None;
+        }
+        if self.sub.rule.as_ref().is_some_and(|r| g.node_col(&r.col).is_none()) {
+            self.sub.rule = None;
         }
     }
 
@@ -751,12 +877,17 @@ impl Session {
 
 // ───────────────────────────── draw list ─────────────────────────────
 
+/// Colour of highlighted attribute-change connections (Apple's system orange: stands out on both backgrounds).
+pub const CHANGE_COLOR: Rgb = [255, 149, 10];
+
 pub struct DrawNode {
     pub x: f32,
     pub y: f32,
     pub r: f32,
     pub rgba: [u8; 4],
     pub selected: bool,
+    /// Sits on a highlighted attribute change: drawn with an accent ring.
+    pub ring: bool,
     pub idx: u32,
 }
 
@@ -773,6 +904,8 @@ pub struct DrawList {
     /// Faded edges, drawn first.
     pub edges_back: Vec<DrawEdge>,
     pub edges: Vec<DrawEdge>,
+    /// Highlighted attribute-change edges, thicker and drawn last.
+    pub edges_hi: Vec<DrawEdge>,
 }
 
 /// Focus/neighbourhood masks used to fade everything but a node and its neighbours.
@@ -786,6 +919,7 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
     out.nodes.clear();
     out.edges.clear();
     out.edges_back.clear();
+    out.edges_hi.clear();
     let g = &s.g;
     let n = g.n();
     if n == 0 {
@@ -814,7 +948,20 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         }
         let mut alpha = ea;
         let mut back = false;
-        if !both {
+        let mut top = false;
+        if let (true, Some(ci)) = (both, &s.change_info) {
+            if ci.edge_hi[e] {
+                top = true;
+            } else if s.change.only {
+                if !ci.edge_path[e] {
+                    continue;
+                }
+                alpha *= 0.8; // a joining path: ordinary edge colour, a little softer
+            } else {
+                alpha *= 0.1;
+                back = true;
+            }
+        } else if !both {
             alpha *= 0.12;
             back = true;
         } else if hi.active && !(hi.focus[ai] || hi.focus[bi]) {
@@ -823,9 +970,17 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         } else if hi.active {
             alpha = (alpha * 2.5).clamp(0.5, 1.0);
         }
-        let c = if uniform { base } else { s.style.edge_rgb.as_ref().unwrap()[e] };
+        if let Some(si) = &s.sub_info {
+            if si.connector[ai] || si.connector[bi] {
+                alpha *= 0.7;
+            }
+        }
+        let c = if top { CHANGE_COLOR } else if uniform { base } else { s.style.edge_rgb.as_ref().unwrap()[e] };
+        if top {
+            alpha = 0.95;
+        }
         let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi] };
-        if back { out.edges_back.push(de) } else { out.edges.push(de) }
+        if top { out.edges_hi.push(de) } else if back { out.edges_back.push(de) } else { out.edges.push(de) }
     }
 
     // nodes (faded first, then normal)
@@ -841,13 +996,28 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             continue;
         }
         let c = s.style.node_rgb[i];
-        let mut alpha = 1.0;
-        if !visible {
+        let mut alpha: f32 = 1.0;
+        let mut ring = false;
+        if let (true, Some(ci)) = (visible, &s.change_info) {
+            if ci.node_hi[i] {
+                ring = true;
+            } else if s.change.only {
+                if !ci.node_path[i] {
+                    continue;
+                }
+                alpha = 0.6; // joins pieces together
+            } else {
+                alpha = 0.3;
+            }
+        } else if !visible {
             alpha = 0.12;
         } else if hi.active && !hi.hood[i] {
             alpha = 0.15;
         }
-        let dn = DrawNode { x: p.x, y: p.y, r, rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], selected: s.sel[i], idx: i as u32 };
+        if s.sub_info.as_ref().is_some_and(|si| si.connector[i]) {
+            alpha = alpha.min(0.6);
+        }
+        let dn = DrawNode { x: p.x, y: p.y, r, rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], selected: s.sel[i], ring, idx: i as u32 };
         if alpha < 1.0 { faded.push(dn) } else { out.nodes.push(dn) }
     }
     faded.append(&mut out.nodes);

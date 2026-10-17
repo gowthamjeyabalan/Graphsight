@@ -3,13 +3,14 @@
 use crate::data::{Column, ColData, NULL_CODE};
 use crate::graph::{Graph, components};
 use egui::Vec2 as V2;
+use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Typical spacing between neighbouring nodes in the static layouts (world units).
 const UNIT: f32 = 24.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LayoutKind {
     Force,
     Circular,
@@ -46,14 +47,15 @@ impl LayoutKind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Orientation {
     TopDown,
     LeftRight,
     Radial,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ForceParams {
     pub charge: f32,
     pub link_dist: f32,
@@ -80,7 +82,8 @@ impl Default for ForceParams {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LayoutSettings {
     pub kind: LayoutKind,
     /// None = file order.

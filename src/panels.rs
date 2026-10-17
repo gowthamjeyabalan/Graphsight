@@ -5,6 +5,8 @@ use crate::data::*;
 use crate::layout::*;
 use crate::model::*;
 use crate::style::*;
+use crate::dock::Tab;
+use crate::theme::{self, UiExt};
 use egui::{CollapsingHeader, ComboBox, RichText, Ui};
 
 #[derive(Clone)]
@@ -17,7 +19,7 @@ pub struct ColInfo {
 fn combo_col(ui: &mut Ui, id: &str, current: &mut Option<String>, cols: &[ColInfo], numeric_only: bool, none_label: &str) -> bool {
     let mut changed = false;
     let text = current.clone().unwrap_or_else(|| none_label.to_string());
-    ComboBox::from_id_salt(id).selected_text(text).width(180.0).show_ui(ui, |ui| {
+    ComboBox::from_id_salt(id).selected_text(text).width(ui.spacing().combo_width).show_ui(ui, |ui| {
         if ui.selectable_label(current.is_none(), none_label).clicked() {
             *current = None;
             changed = true;
@@ -33,13 +35,107 @@ fn combo_col(ui: &mut Ui, id: &str, current: &mut Option<String>, cols: &[ColInf
     changed
 }
 
+/// The editor for one rule (numeric range or category checklist). Returns true if anything changed.
+fn rule_body(ui: &mut Ui, kind: &mut RuleKind, col: &Column, id: usize) -> bool {
+    let mut changed = false;
+    match kind {
+        RuleKind::Range { lo, hi, keep_missing } => {
+            let (cmin, cmax) = col.num_range().unwrap_or((0.0, 1.0));
+            let span = (cmax - cmin).abs();
+            let speed = if span > 0.0 { span / 200.0 } else { 0.01 };
+            ui.horizontal(|ui| {
+                ui.label("from");
+                changed |= ui.add(egui::DragValue::new(lo).speed(speed).range(cmin..=cmax)).changed();
+                ui.label("to");
+                changed |= ui.add(egui::DragValue::new(hi).speed(speed).range(cmin..=cmax)).changed();
+            });
+            let mut l = *lo as f32;
+            let mut h = *hi as f32;
+            let (fmin, fmax) = (cmin as f32, cmax as f32);
+            if fmax > fmin {
+                if ui.add(egui::Slider::new(&mut l, fmin..=fmax).show_value(false)).changed() {
+                    *lo = (l as f64).min(*hi);
+                    changed = true;
+                }
+                if ui.add(egui::Slider::new(&mut h, fmin..=fmax).show_value(false)).changed() {
+                    *hi = (h as f64).max(*lo);
+                    changed = true;
+                }
+            }
+            changed |= ui.switch(keep_missing, "Keep nodes without a value").changed();
+        }
+        RuleKind::Cats { allowed } => {
+            let (codes, labels) = col.as_categories();
+            if allowed.len() != labels.len() + 1 {
+                *allowed = vec![true; labels.len() + 1];
+                changed = true;
+            }
+            let mut counts = vec![0usize; labels.len() + 1];
+            for &c in &codes {
+                counts[if c == NULL_CODE { labels.len() } else { c as usize }] += 1;
+            }
+            let n_on = allowed.iter().filter(|a| **a).count();
+            ui.horizontal(|ui| {
+                ui.weak(format!("{} of {} selected", n_on, allowed.len()));
+                if ui.small_button("All").clicked() {
+                    allowed.iter_mut().for_each(|a| *a = true);
+                    changed = true;
+                }
+                if ui.small_button("None").clicked() {
+                    allowed.iter_mut().for_each(|a| *a = false);
+                    changed = true;
+                }
+                if ui.small_button("Invert").clicked() {
+                    allowed.iter_mut().for_each(|a| *a = !*a);
+                    changed = true;
+                }
+            });
+            egui::ScrollArea::vertical().id_salt(("cats", id)).max_height(140.0).show(ui, |ui| {
+                for (k, a) in allowed.iter_mut().enumerate() {
+                    if k == labels.len() && counts[k] == 0 {
+                        continue;
+                    }
+                    let name = if k == labels.len() { "(empty)".to_string() } else { labels[k].clone() };
+                    changed |= ui.checkbox(a, format!("{name}  ({})", counts[k])).changed();
+                }
+            });
+        }
+    }
+    changed
+}
+
+/// Width of the label column in a row: roughly a third of the panel, within sensible limits.
+fn label_width(ui: &Ui) -> f32 {
+    (ui.available_width() * 0.34).clamp(80.0, 140.0)
+}
+
+fn label_cell(ui: &mut Ui, text: &str, width: f32) {
+    ui.allocate_ui_with_layout(egui::vec2(width, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_size(egui::vec2(width, 22.0));
+        ui.add(egui::Label::new(text).truncate());
+    });
+}
+
 fn slider(ui: &mut Ui, v: &mut f32, range: std::ops::RangeInclusive<f32>, text: &str, log: bool) -> bool {
-    ui.add(egui::Slider::new(v, range).text(text).logarithmic(log)).changed()
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let lw = label_width(ui);
+        label_cell(ui, text, lw);
+        ui.spacing_mut().slider_width = (ui.available_width() - 70.0).max(60.0);
+        changed = ui.add(egui::Slider::new(v, range).logarithmic(log)).changed();
+    });
+    changed
+}
+
+fn body(ui: &mut Ui, f: impl FnOnce(&mut Ui)) {
+    f(ui)
 }
 
 fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        ui.label(label);
+        let lw = label_width(ui);
+        label_cell(ui, label, lw);
+        ui.spacing_mut().combo_width = (ui.available_width() - 12.0).max(90.0);
         add(ui);
     });
 }
@@ -54,21 +150,26 @@ impl App {
             .collect()
     }
 
-    pub fn left_panel(&mut self, ui: &mut Ui) {
+    /// Content of one dockable panel.
+    pub fn panel_content(&mut self, tab: Tab, ui: &mut Ui) {
         let cols = self.col_infos();
-        ui.add_space(4.0);
-        self.section_data(ui);
-        self.section_layout(ui, &cols);
-        self.section_appearance(ui, &cols);
-        self.section_filter(ui, &cols);
-        self.section_analysis(ui);
-        ui.add_space(20.0);
+        theme::panel_body(ui, |ui| match tab {
+            Tab::Data => self.section_data(ui),
+            Tab::Layout => self.section_layout(ui, &cols),
+            Tab::Appearance => self.section_appearance(ui, &cols),
+            Tab::Filter => self.section_filter(ui, &cols),
+            Tab::Analysis => self.section_analysis(ui),
+            Tab::Subgraph => self.section_subgraph(ui, &cols),
+            Tab::Inspector => self.inspector(ui),
+            Tab::Legend => self.legend(ui),
+            Tab::Canvas | Tab::Table => {}
+        });
     }
 
     // ───────────────────────── data ─────────────────────────
 
     fn section_data(&mut self, ui: &mut Ui) {
-        CollapsingHeader::new(RichText::new("Data").strong()).default_open(true).show(ui, |ui| {
+        body(ui, |ui| {
             let mut remove_edges = false;
             let mut remove_nodes = false;
             let mut remap_edges = false;
@@ -76,7 +177,7 @@ impl App {
             let mut directed_changed = false;
             if let Some(src) = &mut self.s.edge_src {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Edges").strong());
+                    ui.label(crate::theme::semibold("Edges"));
                     ui.label(format!("{} · {} rows", src.name, src.table.rows.len()));
                 });
                 ui.horizontal(|ui| {
@@ -89,7 +190,7 @@ impl App {
                     ));
                 });
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut src.mapping.directed, "Directed").changed() {
+                    if ui.switch(&mut src.mapping.directed, "Directed").changed() {
                         directed_changed = true;
                     }
                     if ui.small_button("Remap…").clicked() {
@@ -105,7 +206,7 @@ impl App {
             ui.add_space(2.0);
             if let Some(src) = &self.s.node_src {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Nodes").strong());
+                    ui.label(crate::theme::semibold("Nodes"));
                     ui.label(format!("{} · {} rows", src.name, src.table.rows.len()));
                 });
                 ui.horizontal(|ui| {
@@ -125,12 +226,12 @@ impl App {
             }
             if remap_edges {
                 if let Some(src) = &self.s.edge_src {
-                    self.pending = Some(Pending { name: src.name.clone(), table: src.table.clone(), kind: PendKind::Edges(src.mapping.clone()) });
+                    self.pending = Some(Pending { name: src.name.clone(), path: src.path.clone(), table: src.table.clone(), kind: PendKind::Edges(src.mapping.clone()) });
                 }
             }
             if remap_nodes {
                 if let Some(src) = &self.s.node_src {
-                    self.pending = Some(Pending { name: src.name.clone(), table: src.table.clone(), kind: PendKind::Nodes(src.mapping.clone()) });
+                    self.pending = Some(Pending { name: src.name.clone(), path: src.path.clone(), table: src.table.clone(), kind: PendKind::Nodes(src.mapping.clone()) });
                 }
             }
             if remove_edges {
@@ -174,10 +275,10 @@ impl App {
     // ───────────────────────── layout ─────────────────────────
 
     fn section_layout(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
-        CollapsingHeader::new(RichText::new("Layout").strong()).default_open(true).show(ui, |ui| {
+        body(ui, |ui| {
             let mut apply = false;
             let mut kind = self.s.layout.kind;
-            ComboBox::from_id_salt("layout_kind").selected_text(kind.name()).width(230.0).show_ui(ui, |ui| {
+            ComboBox::from_id_salt("layout_kind").selected_text(kind.name()).width(ui.available_width() - 12.0).show_ui(ui, |ui| {
                 for k in LayoutKind::ALL {
                     ui.selectable_value(&mut kind, k, k.name());
                 }
@@ -198,9 +299,9 @@ impl App {
                     changed |= slider(ui, &mut l.force.gravity, 0.0..=0.4, "Gravity", false);
                     changed |= slider(ui, &mut l.force.friction, 0.05..=0.9, "Friction", false);
                     if has_weights {
-                        changed |= ui.checkbox(&mut l.force.use_weights, "Heavier edges pull closer").changed();
+                        changed |= ui.switch(&mut l.force.use_weights, "Heavier edges pull closer").changed();
                     }
-                    row(ui, "Pull toward group", |ui| {
+                    row(ui, "Group by", |ui| {
                         changed |= combo_col(ui, "force_group", &mut l.group_by, cols, false, "(none)");
                     });
                     if l.group_by.is_some() {
@@ -230,7 +331,7 @@ impl App {
                             self.s.sim.unpin_all();
                         }
                     });
-                    ui.checkbox(&mut self.pin_after_drag, "Keep dragged nodes pinned");
+                    ui.switch(&mut self.pin_after_drag, "Keep dragged nodes pinned");
                     let status = if self.s.sim.running { format!("running · energy {:.3}", self.s.sim.alpha) } else { "settled".to_string() };
                     ui.weak(status);
                 }
@@ -238,7 +339,7 @@ impl App {
                     row(ui, "Order by", |ui| {
                         apply |= combo_col(ui, "order_by", &mut l.order_by, cols, false, "(file order)");
                     });
-                    apply |= ui.checkbox(&mut l.order_desc, "Descending").changed();
+                    apply |= ui.switch(&mut l.order_desc, "Descending").changed();
                 }
                 LayoutKind::Concentric => {
                     row(ui, "Rings by", |ui| {
@@ -251,18 +352,14 @@ impl App {
                             l.ring_bins = bins.round() as usize;
                             apply = true;
                         }
-                        apply |= ui.checkbox(&mut l.center_high, "Highest values in the centre").changed();
+                        apply |= ui.switch(&mut l.center_high, "Highest values in the centre").changed();
                     }
                     row(ui, "Order within ring", |ui| {
                         apply |= combo_col(ui, "order_by2", &mut l.order_by, cols, false, "(by degree)");
                     });
                 }
                 LayoutKind::Hierarchical => {
-                    ui.horizontal(|ui| {
-                        apply |= ui.selectable_value(&mut l.orientation, Orientation::TopDown, "Top-down").changed();
-                        apply |= ui.selectable_value(&mut l.orientation, Orientation::LeftRight, "Left-right").changed();
-                        apply |= ui.selectable_value(&mut l.orientation, Orientation::Radial, "Radial").changed();
-                    });
+                    apply |= ui.segmented(&mut l.orientation, &[(Orientation::TopDown, "Top-down"), (Orientation::LeftRight, "Left-right"), (Orientation::Radial, "Radial")]);
                     ui.weak("Roots: nodes without incoming edges (directed) or the biggest hub per component.");
                 }
                 LayoutKind::GroupBy => {
@@ -274,16 +371,16 @@ impl App {
                 LayoutKind::Scatter => {
                     row(ui, "X axis", |ui| {
                         apply |= combo_col(ui, "x_by", &mut l.x_by, cols, false, "(file order)");
-                        apply |= ui.checkbox(&mut l.x_log, "log").on_hover_text("Spread out skewed numeric values").changed();
+                        apply |= ui.switch(&mut l.x_log, "log").on_hover_text("Spread out skewed numeric values").changed();
                     });
                     row(ui, "Y axis", |ui| {
                         apply |= combo_col(ui, "y_by", &mut l.y_by, cols, false, "(none)");
-                        apply |= ui.checkbox(&mut l.y_log, "log").on_hover_text("Spread out skewed numeric values").changed();
+                        apply |= ui.switch(&mut l.y_log, "log").on_hover_text("Spread out skewed numeric values").changed();
                     });
                 }
                 LayoutKind::Random => {}
             }
-            ui.checkbox(&mut self.s.layout.visible_only, "Lay out visible (filtered) nodes only");
+            ui.switch(&mut self.s.layout.visible_only, "Lay out visible (filtered) nodes only");
             if self.s.layout.kind != LayoutKind::Force && ui.button("Apply layout").clicked() {
                 apply = true;
             }
@@ -301,10 +398,10 @@ impl App {
     // ───────────────────────── appearance ─────────────────────────
 
     fn section_appearance(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
-        CollapsingHeader::new(RichText::new("Appearance").strong()).default_open(true).show(ui, |ui| {
+        body(ui, |ui| {
             let mut restyle = false;
             let look = &mut self.s.look;
-            ui.label(RichText::new("Node colour").strong());
+            crate::theme::heading(ui, "Node colour");
             row(ui, "Colour by", |ui| {
                 restyle |= combo_col(ui, "color_by", &mut look.color_by, cols, false, "(single colour)");
             });
@@ -318,7 +415,7 @@ impl App {
                 Some(col) => {
                     let numeric = col.is_numeric() && !col.hint_cat;
                     if numeric {
-                        restyle |= ui.checkbox(&mut look.color_as_cat, "Treat values as categories").changed();
+                        restyle |= ui.switch(&mut look.color_as_cat, "Treat values as categories").changed();
                     }
                     if numeric && !look.color_as_cat {
                         row(ui, "Palette", |ui| {
@@ -329,15 +426,15 @@ impl App {
                             });
                         });
                         ui.horizontal(|ui| {
-                            restyle |= ui.checkbox(&mut look.invert, "Invert").changed();
-                            restyle |= ui.checkbox(&mut look.log_scale, "Log scale").on_hover_text("Spread out skewed values (degree, PageRank …)").changed();
-                            restyle |= ui.checkbox(&mut look.robust, "Clip 2–98%").on_hover_text("Ignore extreme outliers when scaling").changed();
+                            restyle |= ui.switch(&mut look.invert, "Invert").changed();
+                            restyle |= ui.switch(&mut look.log_scale, "Log scale").on_hover_text("Spread out skewed values (degree, PageRank …)").changed();
+                            restyle |= ui.switch(&mut look.robust, "Clip 2–98%").on_hover_text("Ignore extreme outliers when scaling").changed();
                         });
                     }
                 }
             }
             ui.add_space(4.0);
-            ui.label(RichText::new("Node size").strong());
+            crate::theme::heading(ui, "Node size");
             row(ui, "Size by", |ui| {
                 restyle |= combo_col(ui, "size_by", &mut look.size_by, cols, true, "(constant)");
             });
@@ -347,7 +444,7 @@ impl App {
                 restyle |= slider(ui, &mut look.size_max, 1.0..=8.0, "Largest ×", false);
             }
             ui.add_space(4.0);
-            ui.label(RichText::new("Edges").strong());
+            crate::theme::heading(ui, "Edges");
             row(ui, "Colour", |ui| {
                 ComboBox::from_id_salt("edge_mode")
                     .selected_text(match look.edge_mode {
@@ -374,23 +471,18 @@ impl App {
             slider(ui, &mut look.edge_alpha, 0.02..=1.0, "Opacity", true);
             slider(ui, &mut look.edge_width, 0.4..=5.0, "Width", false);
             if self.s.g.directed {
-                ui.checkbox(&mut look.arrows, "Arrow heads");
+                ui.switch(&mut look.arrows, "Arrow heads");
             }
             ui.add_space(4.0);
-            ui.label(RichText::new("Labels and highlighting").strong());
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut look.labels, LabelMode::Auto, "Labels when zoomed in");
-                ui.selectable_value(&mut look.labels, LabelMode::Never, "Never");
-            });
+            crate::theme::heading(ui, "Labels and highlighting");
+            ui.segmented(&mut look.labels, &[(LabelMode::Auto, "Labels when zoomed in"), (LabelMode::Never, "No labels")]);
             row(ui, "Label text", |ui| {
                 combo_col(ui, "label_by", &mut look.label_by, cols, false, "(node id)");
             });
-            ui.checkbox(&mut look.highlight_hood, "Fade everything but the selection's neighbourhood");
-            ui.horizontal(|ui| {
-                ui.label("Filtered-out nodes:");
-                ui.selectable_value(&mut look.filtered, FilteredMode::Hide, "Hide");
-                ui.selectable_value(&mut look.filtered, FilteredMode::Dim, "Dim");
-            });
+            ui.switch(&mut look.highlight_hood, "Fade all but the selection's neighbours");
+            ui.add_space(2.0);
+            ui.label(theme::secondary("Filtered-out nodes"));
+            ui.segmented(&mut look.filtered, &[(FilteredMode::Hide, "Hide"), (FilteredMode::Dim, "Dim")]);
             if restyle {
                 self.restyle();
             }
@@ -401,11 +493,14 @@ impl App {
 
     fn section_filter(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
         let active = !self.s.filter.is_empty() || self.s.n_manual_hidden() > 0;
-        let title = if active { format!("Filter  ({} of {} nodes)", self.s.n_vis, self.s.g.n()) } else { "Filter".to_string() };
-        CollapsingHeader::new(RichText::new(title).strong()).id_salt("filter").default_open(true).show(ui, |ui| {
+        let title = format!("Showing {} of {} nodes", self.s.n_vis, self.s.g.n());
+        body(ui, |ui| {
+            // always shown, so the widgets below keep stable ids (a line that appears and disappears would
+            // shift auto-generated ids and make the text boxes lose focus after the first typed character)
+            ui.label(crate::theme::secondary(title));
             let mut changed = false;
-            changed |= ui.add(egui::TextEdit::singleline(&mut self.s.filter.search).hint_text("Search id or text…").desired_width(f32::INFINITY)).changed();
-            let resp = ui.add(egui::TextEdit::singleline(&mut self.s.filter.expr_text).hint_text("Expression: score > 3 and group == \"A\"").desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
+            changed |= ui.add(egui::TextEdit::singleline(&mut self.s.filter.search).id_salt("filter_search").hint_text("Search id or text…").desired_width(f32::INFINITY)).changed();
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.s.filter.expr_text).id_salt("filter_expr").hint_text("Expression: score > 3 and group == \"A\"").desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
             changed |= resp.changed();
             resp.on_hover_text("Operators: == != < <= > >=  contains  startswith  in [a, b]  and  or  not  ( )\nUse `backticks` for column names with spaces. See Help for more.");
             if let Some(e) = &self.s.expr_error {
@@ -417,79 +512,17 @@ impl App {
             let mut remove: Option<usize> = None;
             for (ri, rule) in self.s.filter.rules.iter_mut().enumerate() {
                 let Some(col) = self.s.g.node_cols.iter().find(|c| c.name == rule.col) else { continue };
-                ui.group(|ui| {
+                theme::inner_card().show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        changed |= ui.checkbox(&mut rule.enabled, "").changed();
-                        ui.label(RichText::new(&rule.col).strong());
+                        changed |= ui.switch(&mut rule.enabled, "").changed();
+                        ui.label(crate::theme::semibold(&rule.col));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("✕").clicked() {
                                 remove = Some(ri);
                             }
                         });
                     });
-                    match &mut rule.kind {
-                        RuleKind::Range { lo, hi, keep_missing } => {
-                            let (cmin, cmax) = col.num_range().unwrap_or((0.0, 1.0));
-                            let span = (cmax - cmin).abs();
-                            let speed = if span > 0.0 { span / 200.0 } else { 0.01 };
-                            ui.horizontal(|ui| {
-                                ui.label("from");
-                                changed |= ui.add(egui::DragValue::new(lo).speed(speed).range(cmin..=cmax)).changed();
-                                ui.label("to");
-                                changed |= ui.add(egui::DragValue::new(hi).speed(speed).range(cmin..=cmax)).changed();
-                            });
-                            let mut l = *lo as f32;
-                            let mut h = *hi as f32;
-                            let (fmin, fmax) = (cmin as f32, cmax as f32);
-                            if fmax > fmin {
-                                if ui.add(egui::Slider::new(&mut l, fmin..=fmax).show_value(false)).changed() {
-                                    *lo = (l as f64).min(*hi);
-                                    changed = true;
-                                }
-                                if ui.add(egui::Slider::new(&mut h, fmin..=fmax).show_value(false)).changed() {
-                                    *hi = (h as f64).max(*lo);
-                                    changed = true;
-                                }
-                            }
-                            changed |= ui.checkbox(keep_missing, "Keep nodes without a value").changed();
-                        }
-                        RuleKind::Cats { allowed } => {
-                            let (codes, labels) = col.as_categories();
-                            if allowed.len() != labels.len() + 1 {
-                                *allowed = vec![true; labels.len() + 1];
-                                changed = true;
-                            }
-                            let mut counts = vec![0usize; labels.len() + 1];
-                            for &c in &codes {
-                                counts[if c == NULL_CODE { labels.len() } else { c as usize }] += 1;
-                            }
-                            let n_on = allowed.iter().filter(|a| **a).count();
-                            ui.horizontal(|ui| {
-                                ui.weak(format!("{} of {} selected", n_on, allowed.len()));
-                                if ui.small_button("All").clicked() {
-                                    allowed.iter_mut().for_each(|a| *a = true);
-                                    changed = true;
-                                }
-                                if ui.small_button("None").clicked() {
-                                    allowed.iter_mut().for_each(|a| *a = false);
-                                    changed = true;
-                                }
-                                if ui.small_button("Invert").clicked() {
-                                    allowed.iter_mut().for_each(|a| *a = !*a);
-                                    changed = true;
-                                }
-                            });
-                            egui::ScrollArea::vertical().id_salt(("cats", ri)).max_height(140.0).show(ui, |ui| {
-                                for (k, a) in allowed.iter_mut().enumerate() {
-                                    if k == labels.len() && counts[k] == 0 {
-                                        continue;
-                                    }
-                                    let name = if k == labels.len() { "(empty)".to_string() } else { labels[k].clone() };
-                                    changed |= ui.checkbox(a, format!("{name}  ({})", counts[k])).changed();
-                                }
-                            });
-                        }
-                    }
+                    changed |= rule_body(ui, &mut rule.kind, col, ri);
                 });
             }
             if let Some(r) = remove {
@@ -543,7 +576,7 @@ impl App {
     // ───────────────────────── analysis ─────────────────────────
 
     fn section_analysis(&mut self, ui: &mut Ui) {
-        CollapsingHeader::new(RichText::new("Analysis").strong()).default_open(false).show(ui, |ui| {
+        body(ui, |ui| {
             let g = &self.s.g;
             let n = g.n();
             if n == 0 {
@@ -573,7 +606,7 @@ impl App {
             });
             ui.weak("Computed columns (_degree, _pagerank, _kcore, _component, _community …) can be used for colour, size, filters and sorting.");
             ui.add_space(4.0);
-            ui.label(RichText::new("Top nodes").strong());
+            crate::theme::heading(ui, "Top nodes");
             let cols = self.col_infos();
             combo_col(ui, "top_metric", &mut self.top_metric, &cols, true, "(choose a numeric column)");
             let mut pick: Option<usize> = None;
@@ -606,8 +639,7 @@ impl App {
     // ───────────────────────── inspector ─────────────────────────
 
     pub fn inspector(&mut self, ui: &mut Ui) {
-        ui.add_space(4.0);
-        ui.label(RichText::new("Selection").strong());
+        crate::theme::heading(ui, "Selection");
         let sel = self.s.selected_list();
         if sel.is_empty() {
             ui.weak("Click a node, or Shift-drag a box on the canvas.");
@@ -693,17 +725,15 @@ impl App {
                 self.table.dirty = true;
             }
         });
+    }
 
-        // legend
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label(RichText::new("Legend").strong());
+    pub fn legend(&mut self, ui: &mut Ui) {
         match &self.s.style.legend {
             Legend::None => {
                 ui.weak("Single colour");
             }
             Legend::Cat(items) => {
-                egui::ScrollArea::vertical().id_salt("legend_scroll").max_height(260.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("legend_scroll").auto_shrink([false, false]).show(ui, |ui| {
                     for (name, c, count) in items.iter().take(80) {
                         ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
@@ -740,5 +770,198 @@ impl App {
                 });
             }
         }
+    }
+}
+
+// ───────────────────────── subgraph ─────────────────────────
+
+impl App {
+    fn section_subgraph(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
+        if self.s.g.n() == 0 {
+            ui.weak("Load a graph first.");
+            return;
+        }
+        self.sub_section(ui, cols);
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+        self.change_section(ui, cols);
+    }
+
+    fn sub_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
+        crate::theme::heading(ui, "Show a subgraph");
+        ui.weak("Keep only the nodes that match, lay them out again and leave the rest out. Switch it off to get the full graph and its layout back.");
+        ui.add_space(4.0);
+        let mut dirty = false;
+        dirty |= ui.switch(&mut self.s.sub.enabled, "Show subgraph").changed();
+        let mut cur = self.s.sub.rule.as_ref().map(|r| r.col.clone());
+        row(ui, "Attribute", |ui| {
+            if combo_col(ui, "sub_col", &mut cur, cols, false, "(choose an attribute)") {
+                self.s.sub.rule = cur.as_ref().and_then(|c| self.s.g.node_col(c)).map(|col| {
+                    let mut r = Rule::new_for(col);
+                    if let RuleKind::Cats { allowed } = &mut r.kind {
+                        allowed.iter_mut().for_each(|a| *a = false); // tick the values you want
+                    }
+                    r
+                });
+                if self.s.sub.rule.is_some() {
+                    self.s.sub.enabled = true;
+                }
+                dirty = true;
+            }
+        });
+        if let Some(rule) = &mut self.s.sub.rule {
+            if let Some(col) = self.s.g.node_cols.iter().find(|c| c.name == rule.col) {
+                theme::inner_card().show(ui, |ui| {
+                    dirty |= rule_body(ui, &mut rule.kind, col, 1000);
+                });
+            }
+        }
+        ui.add_space(2.0);
+        ui.label("Include neighbours");
+        dirty |= ui.segmented(&mut self.s.sub.hops, &[(0u8, "None"), (1, "1 step"), (2, "2 steps"), (3, "3 steps")]);
+        dirty |= ui
+            .switch(&mut self.s.sub.connect, "Join separate pieces into one graph")
+            .on_hover_text("Where the matching nodes fall apart into pieces, walk the full graph along the shortest paths and add the nodes needed to connect them. Added nodes are drawn dimmer.")
+            .changed();
+        if dirty {
+            self.s.apply_subgraph();
+            self.table.dirty = true;
+        }
+        if let Some(si) = self.s.sub_info.clone() {
+            ui.add_space(4.0);
+            if si.n_match == 0 {
+                ui.weak("Nothing matches yet. Tick the values you want above.");
+            } else {
+                let shown = si.n_match + si.n_neighbours + si.n_connectors;
+                ui.label(format!("{shown} nodes shown"));
+                let mut parts = vec![format!("{} matching", si.n_match)];
+                if si.n_neighbours > 0 {
+                    parts.push(format!("{} neighbours", si.n_neighbours));
+                }
+                if si.n_connectors > 0 {
+                    parts.push(format!("{} joining nodes", si.n_connectors));
+                }
+                ui.label(crate::theme::secondary(parts.join(" + ")));
+                if self.s.sub.connect {
+                    if si.unreachable > 0 {
+                        ui.label(crate::theme::secondary(format!("{} pieces stay apart: the full graph does not connect them", si.unreachable)));
+                    } else if si.pieces_before > 1 {
+                        ui.label(crate::theme::secondary(format!("{} pieces joined into one graph", si.pieces_before)));
+                    }
+                } else if si.pieces_before > 1 {
+                    ui.label(crate::theme::secondary(format!("{} separate pieces", si.pieces_before)));
+                }
+            }
+        }
+    }
+
+    fn change_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
+        crate::theme::heading(ui, "Highlight where a value changes");
+        ui.weak("Marks the connections whose two ends have different values of an attribute, for example where Level goes from 1 to 2.");
+        ui.add_space(4.0);
+        let mut dirty = false;
+        dirty |= ui.switch(&mut self.s.change.enabled, "Highlight changes").changed();
+        row(ui, "Attribute", |ui| {
+            if combo_col(ui, "change_col", &mut self.s.change.col, cols, false, "(choose an attribute)") {
+                self.s.change.pick = None;
+                if self.s.change.col.is_some() {
+                    self.s.change.enabled = true; // choosing an attribute is a clear request to see it
+                }
+                dirty = true;
+            }
+        });
+        let numeric = self.s.change.col.as_deref().and_then(|c| self.s.g.node_col(c)).is_some_and(|c| c.is_numeric() && !c.hint_cat);
+        if numeric {
+            row(ui, "Ignore up to", |ui| {
+                dirty |= ui.add(egui::DragValue::new(&mut self.s.change.min_diff).speed(0.05).range(0.0..=f64::MAX)).on_hover_text("Differences up to this size do not count as a change. 0 counts every difference.").changed();
+            });
+        }
+        dirty |= ui.switch(&mut self.s.change.only, "Show only these connections").changed();
+        if self.s.change.only {
+            dirty |= ui
+                .switch(&mut self.s.change.connect, "Join separate pieces into one graph")
+                .on_hover_text("The changes usually form separate pieces. This adds the connections and nodes needed, along the shortest paths in the graph, to join them into one. They are drawn dimmer.")
+                .changed();
+        }
+        if dirty {
+            self.s.recompute_changes();
+        }
+
+        let Some(info) = self.s.change_info.clone() else {
+            if self.s.change.enabled && self.s.change.col.is_none() {
+                ui.add_space(6.0);
+                ui.weak("Choose an attribute above.");
+            }
+            return;
+        };
+        ui.add_space(6.0);
+        let pct = if info.n_compared > 0 { 100.0 * info.n_change as f64 / info.n_compared as f64 } else { 0.0 };
+        ui.label(format!("{} of {} connections change ({pct:.1}%)", info.n_change, info.n_compared));
+        ui.label(crate::theme::secondary(format!("{} nodes sit on a change", info.n_boundary_nodes)));
+        if self.s.change.only && self.s.change.connect && info.pieces_before > 1 {
+            let extra = if info.n_connectors > 0 { format!(" with {} joining nodes", info.n_connectors) } else { String::new() };
+            if info.pieces_after > 1 {
+                ui.label(crate::theme::secondary(format!("{} pieces, {} could not be joined{extra}", info.pieces_before, info.pieces_after - 1)));
+            } else {
+                ui.label(crate::theme::secondary(format!("{} pieces joined into one graph{extra}", info.pieces_before)));
+            }
+        }
+        if info.n_unknown > 0 {
+            ui.label(crate::theme::secondary(format!("{} connections skipped: a value is missing", info.n_unknown)));
+        }
+        if let Some(m) = info.mean_abs_diff {
+            ui.label(crate::theme::secondary(format!("Average size of a change: {}", fmt_num(m))));
+        }
+
+        if !info.transitions.is_empty() {
+            ui.add_space(6.0);
+            ui.label(theme::semibold("Changes by value"));
+            ui.weak("Click one to highlight only that kind of change.");
+            let directed = self.s.g.directed;
+            let mut toggle: Option<(String, String)> = None;
+            egui::ScrollArea::vertical().id_salt("change_list").max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
+                for t in &info.transitions {
+                    let picked = self.s.change.pick.as_ref().is_some_and(|(a, b)| *a == t.from && *b == t.to);
+                    let hint = match (directed, t.dir) {
+                        (true, 1) => "  up",
+                        (true, -1) => "  down",
+                        _ => "",
+                    };
+                    let text = format!("{}  →  {}{}", t.from, t.to, hint);
+                    ui.horizontal(|ui| {
+                        let w = ui.available_width();
+                        let r = ui.add_sized([(w - 64.0).max(80.0), 22.0], egui::Button::selectable(picked, text).truncate());
+                        ui.label(RichText::new(t.count.to_string()).monospace());
+                        if r.clicked() {
+                            toggle = Some((t.from.clone(), t.to.clone()));
+                        }
+                    });
+                }
+            });
+            if let Some(k) = toggle {
+                self.s.change.pick = if self.s.change.pick.as_ref() == Some(&k) { None } else { Some(k) };
+                self.s.recompute_changes();
+            }
+        } else if info.numeric && info.n_change > 0 {
+            ui.add_space(4.0);
+            ui.weak("This attribute has too many different values for a per-value list.");
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Select nodes at changes").clicked() {
+                self.s.clear_selection();
+                for (i, hit) in info.node_hi.iter().enumerate() {
+                    if *hit {
+                        self.s.set_selected(i, true);
+                    }
+                }
+            }
+            if self.s.change.pick.is_some() && ui.button("Show all changes").clicked() {
+                self.s.change.pick = None;
+                self.s.recompute_changes();
+            }
+        });
     }
 }

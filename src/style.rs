@@ -1,4 +1,5 @@
 //! Colour palettes and value → colour mapping.
+use serde::{Deserialize, Serialize};
 
 pub type Rgb = [u8; 3];
 
@@ -39,7 +40,7 @@ pub fn cat_color(i: usize) -> Rgb {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Palette {
     Viridis,
     Plasma,

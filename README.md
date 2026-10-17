@@ -1,4 +1,4 @@
-# Graphy
+# Grapht
 
 A fast native desktop app (Rust, egui + wgpu) for exploring graphs stored in **CSV** and **JSON** files.
 Load an edges file and, optionally, a nodes file with attributes; colour, size, filter and sort the graph by
@@ -14,12 +14,28 @@ Windows:
 1. Install Rust from <https://rustup.rs> (accept the default MSVC toolchain; it will ask you to install the
    Visual Studio C++ Build Tools if they are missing).
 2. In this folder: `cargo build --release`
-3. Run `target\release\graphy.exe` (or `cargo run --release`).
+3. Run `target\release\grapht.exe` (or `cargo run --release`).
 
 macOS / Linux: the same `cargo build --release`. (Linux needs the usual X11/Wayland + Vulkan or OpenGL libraries.)
 
 Optional: `cargo run --release -- --edges sample/edges.csv --nodes sample/nodes.csv` opens the sample straight away.
 The first build downloads and compiles ~450 crates (several minutes); later builds take seconds.
+
+## Workspace, panels and sessions
+
+The window is a docking workspace in an Apple-style dark theme (Inter typeface). The default arrangement:
+Data / Layout / Appearance / Subgraph tabs and Filter / Analysis tabs on the left, the graph in the middle, the node table
+along the bottom, and the inspector and legend on the right.
+
+* **Move panels:** drag a tab by its title onto another panel to tab them together, or onto an edge to split; drag the
+  dividers to resize. Right-click a tab for *Close panel*; bring panels back with **View ▸ Panels**.
+  **View ▸ Reset panel layout** restores the default. The arrangement is saved automatically (in
+  `%APPDATA%\Grapht\layout.json`) and restored at the next start.
+* **Sessions:** **File ▸ Save session** (Ctrl+S) writes a `.grapht` file with the loaded files and column mappings,
+  all appearance / layout / filter settings, node positions and pins, the selection, hand-hidden nodes, the table
+  sort and the camera. **Open session** (Ctrl+O), **Open recent**, or start `grapht my.grapht`. File paths are stored
+  both absolutely and relative to the session file, so a project folder can be moved. The data is re-read from the
+  original files, so edits to the CSVs show up when you reopen the session.
 
 ## Using it
 
@@ -44,33 +60,20 @@ colour, take the source node's colour, blend both ends, or be coloured by an edg
 **Filtering** — combine any of: search box (id and text columns); per-attribute rules (numeric range, category
 checklist); a free-form expression; hand-hiding (select ▸ Hide / Isolate). Filtered-out nodes are hidden or dimmed.
 
-```
-age > 30 and (group == "A" or group in ["B", "C"])
-not name contains "test"        score >= 2.5        remote == true
-`first name` startswith "An"    degree > 10         score == null
-```
-Operators: `== != < <= > >=`, `contains`, `startswith` (case-insensitive), `in [..]`, `and`/`or`/`not`, parentheses.
-Computed columns work without the leading underscore (`degree`, `pagerank`, `community`).
-
-**Sorting** — the node table under the canvas sorts by any column (click the header: ascending, descending, off),
-follows the current filter, shares the selection with the canvas, and can be exported to CSV.
-
-**Layouts** — force-directed (live, Barnes–Hut, parallel; sliders for repulsion/link distance/gravity/…; optional
-pull toward groups of an attribute; drag nodes to pin), circular, grid, concentric rings by attribute, hierarchical
-(top-down, left-right, radial), group-by-attribute (packed discs, hubs in the middle) and scatter (X/Y by attribute,
-optional log). Circular/grid/concentric can order nodes by any attribute. Static layouts glide into place.
-
-**Canvas** — drag to pan, wheel/pinch to zoom at the cursor, click to select (Ctrl/Shift adds), Shift-drag to box
-select, drag a node to move it (the whole selection moves together), double-click a node to select its neighbours,
-double-click empty space or press `F` to fit. `Esc` clears, `Del` hides the selection, `Ctrl+A` selects all visible,
-`Space` pauses/resumes the force layout. Hovering or selecting fades everything but the neighbourhood.
+**Subgraph** — the *Subgraph* tab has two tools. *Show a subgraph* keeps only the nodes that match an attribute
+(a numeric range or ticked categories), optionally with their neighbours 1–3 steps out, lays them out again and
+hides the rest; switching it off brings the full graph and its layout back. If the matches fall apart into pieces,
+*Join separate pieces* walks the full graph along shortest paths and adds the nodes needed to connect them (drawn
+dimmer). *Highlight where a value changes* marks the connections whose two ends differ in any attribute (e.g. where
+`Level` goes 1 → 2), rings the nodes on them, lists every kind of change with its count (click a row to see just
+that one), and can show only the changes, also joined into one graph. Both respect the filter.
 
 ## Headless export / scripting
 
 ```
-graphy --edges e.csv --nodes n.csv --layout group --group team --color team --size-by _degree \
+grapht --edges e.csv --nodes n.csv --layout group --group team --color team --size-by _degree \
        --filter 'score > 3' --size 3840x2160 --export-png out.png --export-svg out.svg
-graphy --help
+grapht --help
 ```
 
 ## Code map
@@ -80,12 +83,18 @@ graphy --help
 | `data.rs` | CSV/JSON readers, typed columns, column auto-detection |
 | `graph.rs` | graph construction, adjacency, metrics (PageRank, k-core, components, Louvain) |
 | `expr.rs` | filter expression parser/evaluator |
+| `changes.rs` | finds the connections where an attribute changes, with per-value counts |
+| `subgraph.rs` | attribute sub-graphs, N-hop neighbours, joining separate pieces by shortest paths |
 | `layout.rs` | static layouts and the Barnes–Hut force simulation |
 | `model.rs` | session state: appearance, filters, selection, camera, per-frame draw list |
 | `render.rs` | PNG (tiny-skia) and SVG export |
 | `app.rs`, `panels.rs`, `canvas.rs`, `table.rs` | egui UI; the canvas draws nodes as textured quads and edges as meshes |
+| `theme.rs` | fonts, colours, spacing and small widgets (switch, segmented control) |
+| `dock.rs` | the dockable workspace: which panels exist, the default layout |
+| `project.rs`, `config.rs` | `.grapht` session files; per-user settings, recent files and saved panel layout |
+| `vendor/egui_dock` | the `egui_dock` docking crate (MIT), ported to egui 0.37 (one-line change) |
 
-`cargo test --release` runs 50 unit tests, including headless UI tests that feed pointer, wheel and keyboard events
+`cargo test --release` runs the unit tests (60+), including headless UI tests that feed pointer, wheel and keyboard events
 through the real egui code and validate the generated meshes. `cargo test --release bench -- --ignored --nocapture`
 prints the large-graph timings.
 
@@ -95,4 +104,4 @@ prints the large-graph timings.
 * Labels are not included in PNG exports (SVG has them); curved/bundled edges are not implemented.
 * Louvain communities are deterministic but not tuned (resolution is fixed at 1.0).
 * The whole table is loaded into memory — fine for files of a few MB, not meant for multi-GB inputs.
-* Session save/restore is not implemented.
+* Sessions store file paths, not the data itself: moving or deleting the CSVs breaks a session (it opens with a warning).

@@ -242,7 +242,7 @@ impl App {
     fn empty_state(&mut self, ui: &mut Ui, rect: Rect, painter: &Painter) {
         let c = self.s.look.text_color();
         let tc = Color32::from_rgb(c[0], c[1], c[2]);
-        painter.text(rect.center() - Vec2::new(0.0, 40.0), Align2::CENTER_CENTER, "Graphy", FontId::proportional(34.0), tc);
+        painter.text(rect.center() - Vec2::new(0.0, 40.0), Align2::CENTER_CENTER, "Grapht", FontId::proportional(34.0), tc);
         painter.text(
             rect.center() + Vec2::new(0.0, 0.0),
             Align2::CENTER_CENTER,
@@ -434,10 +434,11 @@ impl App {
         let off = rect.min.to_vec2();
         let look = &self.s.look;
         let width = look.edge_width;
-        let n_edges = self.draw.edges.len() + self.draw.edges_back.len();
+        let n_edges = self.draw.edges.len() + self.draw.edges_back.len() + self.draw.edges_hi.len();
         let aa = n_edges <= 20_000;
         let arrows = self.s.g.directed && look.arrows && n_edges <= 15_000;
-        for list in [&self.draw.edges_back, &self.draw.edges] {
+        for (li, list) in [&self.draw.edges_back, &self.draw.edges, &self.draw.edges_hi].into_iter().enumerate() {
+            let width = if li == 2 { width * 2.0 + 0.4 } else { width };
             if list.is_empty() {
                 continue;
             }
@@ -475,6 +476,10 @@ impl App {
             if n.selected {
                 let (k, half) = class_of(n.r + 3.0);
                 halos[k].quad_uv(pos, half, halo);
+            } else if n.ring {
+                let (k, half) = class_of(n.r + 2.5);
+                let c = crate::model::CHANGE_COLOR;
+                halos[k].quad_uv(pos, half, Color32::from_rgb(c[0], c[1], c[2]));
             }
             let (k, half) = class_of(n.r);
             nodes[k].quad_uv(pos, half, col(n.rgba));

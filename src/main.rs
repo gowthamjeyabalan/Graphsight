@@ -2,31 +2,38 @@
 
 mod app;
 mod canvas;
+mod changes;
+mod config;
 mod data;
+mod dock;
 mod expr;
 mod graph;
 mod layout;
 mod model;
 mod panels;
+mod project;
 mod render;
 mod style;
+mod subgraph;
 mod table;
+mod theme;
 
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
 const HELP: &str = "\
-Graphy — fast graph explorer for CSV and JSON files
+Grapht — fast graph explorer for CSV and JSON files
 
 USAGE
-  graphy [FILES] [OPTIONS]
+  grapht [FILES] [OPTIONS]
 
 INPUT
   --edges FILE        edges CSV/TSV (columns like source,target[,weight,…])
   --nodes FILE        nodes CSV/TSV (an id column plus attributes)
   --json FILE         JSON graph ({nodes,links|edges}, Cytoscape elements, edge array)
   --directed          treat edges as directed
-  FILE                a bare .csv/.json path is classified automatically
+  FILE                a bare .csv/.json path is classified automatically;
+                      a .grapht path opens a saved session
 
 HEADLESS EXPORT (no window)
   --export-png OUT    render the graph to a PNG
@@ -228,6 +235,22 @@ fn attach_parent_console() {
     }
 }
 
+/// The Grapht app icon (256 px PNG baked into the binary), used for the window and taskbar.
+fn window_icon() -> egui::IconData {
+    const PNG: &[u8] = include_bytes!("../assets/icon/grapht-256.png");
+    match tiny_skia::Pixmap::decode_png(PNG) {
+        Ok(pm) => {
+            // tiny-skia stores premultiplied alpha, IconData wants straight RGBA
+            let rgba = pm.pixels().iter().flat_map(|p| {
+                let c = p.demultiply();
+                [c.red(), c.green(), c.blue(), c.alpha()]
+            }).collect();
+            egui::IconData { rgba, width: pm.width(), height: pm.height() }
+        }
+        Err(_) => egui::IconData::default(),
+    }
+}
+
 fn main() -> Result<()> {
     let cli = parse_cli();
     let headless_mode = match &cli {
@@ -251,9 +274,11 @@ fn main() -> Result<()> {
     }
 
     // classify bare paths for the GUI
-    let mut args = app::Args { edges: cli.edges, nodes: cli.nodes, json: cli.json, directed: cli.directed };
+    let mut args = app::Args { edges: cli.edges, nodes: cli.nodes, json: cli.json, directed: cli.directed, project: None };
     for p in cli.positional {
-        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case(project::EXTENSION)) {
+            args.project = Some(p);
+        } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
             args.json = Some(p);
         } else if args.edges.is_none() {
             args.edges = Some(p);
@@ -264,11 +289,25 @@ fn main() -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Graphy")
+            .with_title("Grapht")
+            .with_icon(window_icon())
             .with_inner_size([1480.0, 920.0])
             .with_min_inner_size([920.0, 580.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("Graphy", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args))))).map_err(|e| anyhow::anyhow!("{e}"))
+    eframe::run_native("Grapht", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args))))).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[cfg(test)]
+mod icon_tests {
+    #[test]
+    fn window_icon_decodes() {
+        let i = super::window_icon();
+        assert_eq!((i.width, i.height), (256, 256));
+        assert_eq!(i.rgba.len(), 256 * 256 * 4);
+        assert_eq!(i.rgba[3], 0, "corner is transparent");
+        let mid = (128 * 256 + 20) * 4; // inside the blue tile, left of the glyph
+        assert_eq!(&i.rgba[mid..mid + 4], &[10, 132, 255, 255]);
+    }
 }

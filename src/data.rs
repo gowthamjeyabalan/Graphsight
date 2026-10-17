@@ -1,6 +1,7 @@
 //! Raw tabular data, typed columns, CSV and JSON loading.
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::path::Path;
 
@@ -108,7 +109,7 @@ fn find_alias(headers: &[String], names: &[&str]) -> Option<usize> {
     None
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EdgeMapping {
     pub src: usize,
     pub dst: usize,
@@ -116,7 +117,7 @@ pub struct EdgeMapping {
     pub directed: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeMapping {
     pub id: usize,
 }
@@ -152,7 +153,7 @@ pub enum ColData {
 pub struct Column {
     pub name: String,
     pub data: ColData,
-    /// Computed by Graphy (degree, pagerank …) rather than loaded from a file.
+    /// Computed by Grapht (degree, pagerank …) rather than loaded from a file.
     pub is_metric: bool,
     /// Numeric column that is better treated as categories (component id, community id).
     pub hint_cat: bool,

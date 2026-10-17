@@ -6,8 +6,8 @@ use crate::render;
 use egui::{Context, Pos2, Vec2};
 use std::path::PathBuf;
 
-const SAMPLE_NODES: &str = include_str!("../sample/nodes.csv");
-const SAMPLE_EDGES: &str = include_str!("../sample/edges.csv");
+pub const SAMPLE_NODES: &str = include_str!("../sample/nodes.csv");
+pub const SAMPLE_EDGES: &str = include_str!("../sample/edges.csv");
 
 pub enum PendKind {
     Edges(EdgeMapping),
@@ -16,6 +16,7 @@ pub enum PendKind {
 
 pub struct Pending {
     pub name: String,
+    pub path: Option<PathBuf>,
     pub table: RawTable,
     pub kind: PendKind,
 }
@@ -52,12 +53,17 @@ pub struct App {
     pub pending: Option<Pending>,
     pub error: Option<String>,
     pub toast: Option<(String, f64)>,
-    pub show_table: bool,
-    pub show_inspector: bool,
+    pub dock: Option<egui_dock::DockState<crate::dock::Tab>>,
+    pub project: Option<PathBuf>,
+    pub settings: crate::config::Settings,
+    /// Only the real application persists its layout; tests and headless runs must not touch the user's files.
+    pub persist: bool,
+    pub layout_text: String,
+    pub layout_check: f64,
+    pub last_title: String,
     pub show_help: bool,
     pub table: TableState,
     pub top_metric: Option<String>,
-    pub applied_dark: Option<bool>,
     pub sim_paused: bool,
     pub frame_ms: f32,
 }
@@ -77,6 +83,7 @@ fn make_disc(size: usize) -> egui::ColorImage {
 }
 
 pub struct Args {
+    pub project: Option<PathBuf>,
     pub edges: Option<PathBuf>,
     pub nodes: Option<PathBuf>,
     pub json: Option<PathBuf>,
@@ -85,10 +92,18 @@ pub struct Args {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
-        Self::new_with_ctx(&cc.egui_ctx, args)
+        let mut app = Self::new_with_ctx(&cc.egui_ctx, args);
+        app.persist = true;
+        app.settings = crate::config::Settings::load();
+        if let Some(d) = crate::config::load_layout() {
+            app.dock = Some(d);
+        }
+        app.layout_text = app.dock.as_ref().and_then(crate::config::layout_to_string).unwrap_or_default();
+        app
     }
 
     pub fn new_with_ctx(ctx: &Context, args: Args) -> Self {
+        crate::theme::apply(ctx);
         let opts = egui::TextureOptions::LINEAR;
         let tex = Textures {
             small: ctx.load_texture("disc16", make_disc(16), opts),
@@ -114,15 +129,22 @@ impl App {
             pending: None,
             error: None,
             toast: None,
-            show_table: true,
-            show_inspector: true,
+            dock: Some(crate::dock::default_dock()),
+            project: None,
+            settings: crate::config::Settings::default(),
+            persist: false,
+            layout_text: String::new(),
+            layout_check: 0.0,
+            last_title: String::new(),
             show_help: false,
             table: TableState { dirty: true, ..Default::default() },
             top_metric: Some("_pagerank".into()),
-            applied_dark: None,
             sim_paused: false,
             frame_ms: 0.0,
         };
+        if let Some(p) = args.project {
+            app.open_project(&p);
+        }
         if let Some(j) = args.json {
             app.load_path(j, None);
         }
@@ -196,6 +218,7 @@ impl App {
         };
         let pend = Pending {
             name,
+            path: Some(path.clone()),
             kind: match kind {
                 PendKindHint::Edges => PendKind::Edges(auto_edge_mapping(&table)),
                 PendKindHint::Nodes => PendKind::Nodes(auto_node_mapping(&table)),
@@ -212,13 +235,23 @@ impl App {
     pub fn commit_import(&mut self, p: Pending) {
         match p.kind {
             PendKind::Edges(mut m) => {
+                let path = p.path.clone();
                 // keep the user's directed choice when re-importing
                 if let Some(old) = &self.s.edge_src {
                     m.directed = old.mapping.directed;
                 }
                 self.s.set_edges(p.name, p.table, m);
+                if let Some(src) = &mut self.s.edge_src {
+                    src.path = path;
+                }
             }
-            PendKind::Nodes(m) => self.s.set_nodes(p.name, p.table, m),
+            PendKind::Nodes(m) => {
+                let path = p.path.clone();
+                self.s.set_nodes(p.name, p.table, m);
+                if let Some(src) = &mut self.s.node_src {
+                    src.path = path;
+                }
+            }
         }
         self.rebuild();
     }
@@ -305,12 +338,99 @@ impl App {
         }
     }
 
+    // ── layout persistence, shortcuts, title ──
+
+    pub fn save_layout_now(&mut self) {
+        if !self.persist {
+            return;
+        }
+        if let Some(text) = self.dock.as_ref().and_then(crate::config::layout_to_string) {
+            if text != self.layout_text {
+                crate::config::save_layout_text(&text);
+                self.layout_text = text;
+            }
+        }
+    }
+
+    /// Writes the panel arrangement to disk shortly after it changes.
+    fn persist_layout(&mut self, ctx: &Context) {
+        if !self.persist {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        if now - self.layout_check > 1.0 {
+            self.layout_check = now;
+            self.save_layout_now();
+        }
+    }
+
+    fn update_window_title(&mut self, ctx: &Context) {
+        let title = self.project_title();
+        if title != self.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
+        }
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &Context) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let save_as = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
+        let save = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+        let open = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+        let (do_save_as, do_save, do_open) = ctx.input_mut(|i| (i.consume_shortcut(&save_as), i.consume_shortcut(&save), i.consume_shortcut(&open)));
+        if do_save_as {
+            self.report(ctx, |a| a.save_project_as(), "Session saved");
+        } else if do_save {
+            self.report(ctx, |a| a.save_project(), "Session saved");
+        } else if do_open {
+            self.open_project_dialog();
+        }
+    }
+
+    fn report(&mut self, ctx: &Context, f: impl FnOnce(&mut App) -> anyhow::Result<bool>, done: &str) {
+        match f(self) {
+            Ok(true) => self.toast(ctx, done),
+            Ok(false) => {}
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
     // ── menus and dialogs ──
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                if ui.add(egui::Button::new("New session")).clicked() {
+                    ui.close();
+                    self.new_project();
+                }
+                if ui.add(egui::Button::new("Open session…").shortcut_text(ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O)))).clicked() {
+                    ui.close();
+                    self.open_project_dialog();
+                }
+                ui.add_enabled_ui(!self.settings.recent.is_empty(), |ui| {
+                    ui.menu_button("Open recent", |ui| {
+                        let recent = self.settings.recent.clone();
+                        for r in recent {
+                            let p = std::path::PathBuf::from(&r);
+                            let label = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| r.clone());
+                            if ui.button(label).on_hover_text(&r).clicked() {
+                                ui.close();
+                                self.open_project(&p);
+                            }
+                        }
+                    });
+                });
+                if ui.add(egui::Button::new("Save session").shortcut_text(ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S)))).clicked() {
+                    ui.close();
+                    self.report(&ctx, |a| a.save_project(), "Session saved");
+                }
+                if ui.add(egui::Button::new("Save session as…").shortcut_text(ctx.format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S)))).clicked() {
+                    ui.close();
+                    self.report(&ctx, |a| a.save_project_as(), "Session saved");
+                }
+                ui.separator();
                 if ui.button("Open edges file…").clicked() {
                     ui.close();
                     self.pick_and_load(Some(PendKindHint::Edges));
@@ -358,9 +478,25 @@ impl App {
                 }
             });
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut self.show_table, "Node table");
-                ui.checkbox(&mut self.show_inspector, "Inspector");
-                if ui.checkbox(&mut self.s.look.dark, "Dark theme").changed() {
+                ui.label(crate::theme::secondary("Panels"));
+                let mut dock = self.dock.take().unwrap_or_else(crate::dock::default_dock);
+                for tab in crate::dock::Tab::ALL.into_iter().filter(|t| *t != crate::dock::Tab::Canvas) {
+                    let mut open = crate::dock::is_open(&dock, tab);
+                    if ui.checkbox(&mut open, tab.title()).changed() {
+                        if open {
+                            crate::dock::open_or_focus(&mut dock, tab);
+                        } else {
+                            crate::dock::close(&mut dock, tab);
+                        }
+                    }
+                }
+                if ui.button("Reset panel layout").clicked() {
+                    ui.close();
+                    dock = crate::dock::default_dock();
+                }
+                self.dock = Some(dock);
+                ui.separator();
+                if ui.checkbox(&mut self.s.look.dark, "Dark graph background").changed() {
                     self.restyle();
                 }
                 ui.separator();
@@ -522,32 +658,24 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.ui_inner(ui);
     }
+
+    fn on_exit(&mut self) {
+        self.save_layout_now();
+    }
 }
 
 impl App {
     pub fn ui_inner(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let t0 = std::time::Instant::now();
-        if self.applied_dark != Some(self.s.look.dark) {
-            ctx.set_visuals(if self.s.look.dark { egui::Visuals::dark() } else { egui::Visuals::light() });
-            self.applied_dark = Some(self.s.look.dark);
-        }
         self.handle_drops(&ctx);
+        self.handle_shortcuts(&ctx);
+        self.update_window_title(&ctx);
 
-        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::left("left").resizable(true).default_size(310.0).size_range(260.0..=520.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.left_panel(ui));
-        });
-        if self.show_inspector {
-            egui::Panel::right("right").resizable(true).default_size(250.0).size_range(200.0..=450.0).show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.inspector(ui));
-            });
-        }
-        if self.show_table {
-            egui::Panel::bottom("table").resizable(true).default_size(230.0).size_range(90.0..=700.0).show(ui, |ui| self.table_panel(ui));
-        }
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.canvas(ui));
+        egui::Panel::top("menu").frame(egui::Frame::new().fill(crate::theme::BG).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| self.menu_bar(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::BG)).show(ui, |ui| self.show_dock(ui));
 
+        self.persist_layout(&ctx);
         self.dialogs(&ctx);
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = self.frame_ms * 0.9 + ms * 0.1;
@@ -574,7 +702,7 @@ mod ui_tests {
     impl Harness {
         fn new() -> Self {
             let ctx = Context::default();
-            let app = App::new_with_ctx(&ctx, Args { edges: None, nodes: None, json: None, directed: false });
+            let app = App::new_with_ctx(&ctx, Args { edges: None, nodes: None, json: None, directed: false, project: None });
             Harness { ctx, app, t: 0.0, mods: Modifiers::NONE, applied: Modifiers::NONE }
         }
 
@@ -589,7 +717,8 @@ mod ui_tests {
                 self.applied = self.mods;
             }
             let app = &mut self.app;
-            let out = self.ctx.run_ui(input, |ui| app.ui_inner(ui));
+            let mut out = self.ctx.run_ui(input, |ui| app.ui_inner(ui));
+            out.textures_delta.clear(); // not uploading anywhere; egui panics on dropping unapplied deltas
             let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
             let mut verts = 0;
             for p in &prims {
@@ -640,6 +769,95 @@ mod ui_tests {
         assert!(h.app.draw.edges.len() + h.app.draw.edges_back.len() > 3000);
         // the camera has been fitted to the graph
         assert!(h.app.cam.zoom != 1.0);
+    }
+
+    #[test]
+    fn default_dock_layout_is_sane_and_roundtrips() {
+        let d = crate::dock::default_dock();
+        assert!(crate::dock::is_sane(&d));
+        for t in crate::dock::Tab::ALL {
+            assert!(crate::dock::is_open(&d, t), "{t:?} missing from the default layout");
+        }
+        let text = crate::config::layout_to_string(&d).unwrap();
+        let back = crate::config::layout_from_str(&text).expect("a freshly built dock must load back");
+        assert!(crate::dock::is_sane(&back));
+        // a live layout (some panel rectangles may still be unmeasured) also loads back and is then stable
+        let mut h = Harness::new();
+        h.frames(3);
+        let live = crate::config::layout_to_string(h.app.dock.as_ref().unwrap()).unwrap();
+        let back2 = crate::config::layout_from_str(&live).expect("live layout loads");
+        let t2 = crate::config::layout_to_string(&back2).unwrap();
+        let back3 = crate::config::layout_from_str(&t2).unwrap();
+        assert_eq!(t2, crate::config::layout_to_string(&back3).unwrap());
+        // closing and reopening a panel
+        let mut d = d;
+        crate::dock::close(&mut d, crate::dock::Tab::Filter);
+        assert!(!crate::dock::is_open(&d, crate::dock::Tab::Filter));
+        crate::dock::open_or_focus(&mut d, crate::dock::Tab::Filter);
+        assert!(crate::dock::is_open(&d, crate::dock::Tab::Filter));
+        crate::dock::close(&mut d, crate::dock::Tab::Canvas);
+        assert!(crate::dock::is_sane(&d), "the graph canvas can never be closed");
+    }
+
+    #[test]
+    fn session_file_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("grapht-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("e.csv"), SAMPLE_EDGES).unwrap();
+        std::fs::write(dir.join("n.csv"), SAMPLE_NODES).unwrap();
+        let mut h = Harness::new();
+        h.app.load_path(dir.join("e.csv"), Some(PendKindHint::Edges));
+        h.app.load_path(dir.join("n.csv"), Some(PendKindHint::Nodes));
+        h.frames(3);
+        let n = h.app.s.g.n();
+        assert!(n > 1000);
+        h.app.s.layout.kind = crate::layout::LayoutKind::Circular;
+        h.app.s.apply_layout_now();
+        h.app.s.look.node_size = 7.5;
+        h.app.s.look.edge_alpha = 0.123;
+        h.app.s.filter.expr_text = "_degree > 2".into();
+        h.app.s.select_only(5);
+        h.app.s.sim.pinned = vec![false; n];
+        h.app.s.sim.pinned[7] = true;
+        h.app.s.manual_hidden[9] = true;
+        h.app.table.sort = Some(("_degree".into(), false));
+        h.app.cam = ViewCam { center: Vec2::new(12.0, -34.0), zoom: 2.5 };
+        h.app.auto_fit = false;
+        let want_pos = h.app.s.pos.clone();
+        let want_id5 = h.app.s.g.ids[5].clone();
+        let file = dir.join("work.grapht");
+        h.app.save_project_to(&file).unwrap();
+        assert!(h.app.project.as_deref() == Some(file.as_path()));
+
+        let mut h2 = Harness::new();
+        h2.app.open_project(&file);
+        assert!(h2.app.error.is_none(), "{:?}", h2.app.error);
+        assert_eq!(h2.app.s.g.n(), n);
+        assert_eq!(h2.app.s.layout.kind, crate::layout::LayoutKind::Circular);
+        assert_eq!(h2.app.s.look.node_size, 7.5);
+        assert_eq!(h2.app.s.look.edge_alpha, 0.123);
+        assert_eq!(h2.app.s.filter.expr_text, "_degree > 2");
+        assert_eq!(h2.app.s.selected_list().len(), 1);
+        assert_eq!(h2.app.s.g.ids[h2.app.s.selected_list()[0] as usize], want_id5);
+        assert!(h2.app.s.sim.pinned[7]);
+        assert!(h2.app.s.manual_hidden[9]);
+        assert_eq!(h2.app.table.sort, Some(("_degree".to_string(), false)));
+        assert_eq!(h2.app.cam.zoom, 2.5);
+        assert!(!h2.app.auto_fit);
+        for i in 0..n {
+            assert!((h2.app.s.pos[i] - want_pos[i]).length() < 1e-3, "position {i} differs");
+        }
+        h2.frames(5);
+        assert!((h2.app.s.pos[3] - want_pos[3]).length() < 1e-3, "layout must not move after restore");
+        assert_eq!(h2.app.cam.zoom, 2.5, "camera must not be re-fitted");
+
+        // a missing data file is reported, not fatal
+        std::fs::remove_file(dir.join("n.csv")).unwrap();
+        let mut h3 = Harness::new();
+        h3.app.open_project(&file);
+        assert!(h3.app.error.as_deref().is_some_and(|e| e.contains("Nodes file not found")));
+        assert!(h3.app.s.g.n() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -805,7 +1023,7 @@ mod ui_tests {
 
     #[test]
     fn json_roundtrip_through_the_gui_loader() {
-        let dir = std::env::temp_dir().join("graphy_ui_test");
+        let dir = std::env::temp_dir().join("grapht_ui_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("g.json");
         std::fs::write(&path, r#"{"directed":true,"nodes":[{"id":"a","kind":"x"},{"id":"b","kind":"y"},{"id":"c","kind":"x"}],"links":[{"source":"a","target":"b"},{"source":"b","target":"c"}]}"#).unwrap();
@@ -819,7 +1037,7 @@ mod ui_tests {
 
     #[test]
     fn csv_import_dialog_flow() {
-        let dir = std::env::temp_dir().join("graphy_ui_test");
+        let dir = std::env::temp_dir().join("grapht_ui_test");
         std::fs::create_dir_all(&dir).unwrap();
         // unusual column names → the mapping dialog must appear instead of silently guessing
         let e = dir.join("odd_edges.csv");

@@ -43,7 +43,8 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
 
     // edges, grouped by colour so uniform graphs need a single stroke call
     let stroke = Stroke { width: s.look.edge_width.max(0.2), ..Default::default() };
-    let draw_edges = |pm: &mut Pixmap, edges: &[DrawEdge]| {
+    let draw_edges = |pm: &mut Pixmap, edges: &[DrawEdge], wmul: f32| {
+        let stroke = Stroke { width: stroke.width * wmul, ..Default::default() };
         let mut groups: Vec<([u8; 4], PathBuilder)> = Vec::new();
         let mut index: std::collections::HashMap<[u8; 4], usize> = std::collections::HashMap::new();
         for e in edges {
@@ -75,8 +76,9 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
             }
         }
     };
-    draw_edges(&mut pm, &dl.edges_back);
-    draw_edges(&mut pm, &dl.edges);
+    draw_edges(&mut pm, &dl.edges_back, 1.0);
+    draw_edges(&mut pm, &dl.edges, 1.0);
+    draw_edges(&mut pm, &dl.edges_hi, 2.4);
 
     let ring = {
         let t = s.look.text_color();
@@ -88,6 +90,11 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
             if n.selected {
                 if let Some(ring_path) = PathBuilder::from_circle(n.x, n.y, n.r + 2.0) {
                     pm.stroke_path(&ring_path, &ring, &Stroke { width: 2.0, ..Default::default() }, tf, None);
+                }
+            } else if n.ring {
+                if let Some(ring_path) = PathBuilder::from_circle(n.x, n.y, n.r + 2.0) {
+                    let c = CHANGE_COLOR;
+                    pm.stroke_path(&ring_path, &paint([c[0], c[1], c[2], 255]), &Stroke { width: 2.0, ..Default::default() }, tf, None);
                 }
             }
         }
@@ -103,16 +110,19 @@ pub fn render_svg(s: &Session, cam: &ViewCam, w: f32, h: f32) -> String {
     let mut dl = DrawList::default();
     build_draw_list(s, cam, size, &hi, &mut dl);
     let bg = s.look.background();
-    let mut out = String::with_capacity(dl.nodes.len() * 90 + (dl.edges.len() + dl.edges_back.len()) * 100 + 512);
+    let mut out = String::with_capacity(dl.nodes.len() * 90 + (dl.edges.len() + dl.edges_back.len() + dl.edges_hi.len()) * 100 + 512);
     let _ = writeln!(out, r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#);
     let _ = writeln!(out, r#"<rect width="100%" height="100%" fill="rgb({},{},{})"/>"#, bg[0], bg[1], bg[2]);
     let _ = writeln!(out, r#"<g fill="none" stroke-width="{}">"#, s.look.edge_width);
-    for e in dl.edges_back.iter().chain(dl.edges.iter()) {
-        let _ = writeln!(
-            out,
-            r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="rgb({},{},{})" stroke-opacity="{:.2}"/>"#,
-            e.a[0], e.a[1], e.b[0], e.b[1], e.rgba[0], e.rgba[1], e.rgba[2], e.rgba[3] as f32 / 255.0
-        );
+    for (li, list) in [&dl.edges_back, &dl.edges, &dl.edges_hi].into_iter().enumerate() {
+        for e in list.iter() {
+            let w = if li == 2 { format!(r#" stroke-width="{:.1}""#, s.look.edge_width * 2.4) } else { String::new() };
+            let _ = writeln!(
+                out,
+                r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="rgb({},{},{})" stroke-opacity="{:.2}"{w}/>"#,
+                e.a[0], e.a[1], e.b[0], e.b[1], e.rgba[0], e.rgba[1], e.rgba[2], e.rgba[3] as f32 / 255.0
+            );
+        }
     }
     out.push_str("</g>\n");
     let t = s.look.text_color();
@@ -125,6 +135,9 @@ pub fn render_svg(s: &Session, cam: &ViewCam, w: f32, h: f32) -> String {
         );
         if n.selected {
             let _ = write!(out, r#" stroke="rgb({},{},{})" stroke-width="2""#, t[0], t[1], t[2]);
+        } else if n.ring {
+            let c = CHANGE_COLOR;
+            let _ = write!(out, r#" stroke="rgb({},{},{})" stroke-width="2""#, c[0], c[1], c[2]);
         }
         out.push_str("/>\n");
         if label_all || n.selected {
