@@ -650,7 +650,7 @@ impl QuadTree {
         Cell { cx, cy, half, mass: 0.0, mx: 0.0, my: 0.0, lx: 0.0, ly: 0.0, leaf: NONE, child: [0; 4] }
     }
 
-    fn build(pts: &[(u32, V2)]) -> QuadTree {
+    fn build(pts: &[(u32, V2)], mut cells: Vec<Cell>) -> QuadTree {
         let (mut lo, mut hi) = (V2::splat(f32::INFINITY), V2::splat(f32::NEG_INFINITY));
         for (_, p) in pts {
             lo = lo.min(*p);
@@ -662,7 +662,9 @@ impl QuadTree {
         }
         let c = (lo + hi) * 0.5;
         let half = ((hi.x - lo.x).max(hi.y - lo.y) * 0.5).max(1.0) * 1.001 + 1.0;
-        let mut t = QuadTree { cells: Vec::with_capacity(pts.len() * 2 + 8) };
+        cells.clear();
+        cells.reserve(pts.len() * 2 + 8);
+        let mut t = QuadTree { cells };
         t.cells.push(Self::new_cell(c.x, c.y, half));
         for &(id, p) in pts {
             t.insert(id, p);
@@ -798,13 +800,32 @@ pub struct ForceSim {
     anchors: Option<Vec<V2>>,
     isolated: Vec<bool>,
     pub ticks: usize,
+    // buffers kept between ticks so a tick does not allocate (and page-fault) megabytes every time
+    pts: Vec<(u32, V2)>,
+    dv: Vec<V2>,
+    cells: Vec<Cell>,
+    // where an iteration that is being worked through in slices stands (see `step_for`)
+    phase: Phase,
+    cursor: usize,
+    tick_alpha: f32,
+    tree: Option<QuadTree>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Between iterations.
+    Idle,
+    /// The tree is built; the repulsion of the nodes from `cursor` on is still to be computed.
+    Forces,
+    /// All repulsions are known; springs and the move remain.
+    Finish,
 }
 
 pub const ALPHA_MIN: f32 = 0.001;
 
 impl ForceSim {
     pub fn new() -> Self {
-        ForceSim { alpha: 1.0, running: false, vel: vec![], pinned: vec![], active: vec![], links: vec![], anchors: None, isolated: vec![], ticks: 0 }
+        ForceSim { alpha: 1.0, running: false, vel: vec![], pinned: vec![], active: vec![], links: vec![], anchors: None, isolated: vec![], ticks: 0, pts: vec![], dv: vec![], cells: vec![], phase: Phase::Idle, cursor: 0, tick_alpha: 0.0, tree: None }
     }
 
     pub fn reheat(&mut self, alpha: f32) {
@@ -819,6 +840,8 @@ impl ForceSim {
             self.pinned = vec![false; n];
         }
         self.vel = vec![V2::ZERO; n];
+        self.phase = Phase::Idle;
+        self.tree = None;
         self.active = active.to_vec();
         self.anchors = anchors;
         let mut in_active = vec![false; n];
@@ -873,85 +896,154 @@ impl ForceSim {
 
     /// Advance the simulation by `ticks` iterations.
     pub fn step(&mut self, pos: &mut [V2], p: &ForceParams, ticks: usize) {
-        if self.active.is_empty() {
-            self.running = false;
-            return;
-        }
-        let decay = 1.0 - ALPHA_MIN.powf(1.0 / 300.0);
-        let theta2 = p.theta * p.theta;
         for _ in 0..ticks {
-            self.alpha -= self.alpha * decay;
-            if self.alpha < ALPHA_MIN {
-                self.running = false;
-                self.alpha = ALPHA_MIN;
+            if !self.begin_tick(pos) {
                 break;
             }
-            let alpha = self.alpha;
-            // many-body repulsion (Barnes–Hut)
-            let pts: Vec<(u32, V2)> = self.active.iter().map(|&i| (i, pos[i as usize])).collect();
-            let tree = QuadTree::build(&pts);
-            let dv: Vec<V2> = if pts.len() > 1500 {
-                pts.par_iter().map(|&(i, q)| tree.force(i, q, p.charge, alpha, theta2)).collect()
-            } else {
-                pts.iter().map(|&(i, q)| tree.force(i, q, p.charge, alpha, theta2)).collect()
-            };
-            for (k, &(i, _)) in pts.iter().enumerate() {
-                self.vel[i as usize] += dv[k];
+            while self.phase == Phase::Forces {
+                self.force_block(p, usize::MAX);
             }
-            // springs
-            for l in &self.links {
-                let (s, t) = (l.s as usize, l.t as usize);
-                let mut d = pos[t] + self.vel[t] - pos[s] - self.vel[s];
-                if d.x == 0.0 {
-                    d.x = jiggle(l.s, 3);
-                }
-                if d.y == 0.0 {
-                    d.y = jiggle(l.t, 4);
-                }
-                let len = d.length();
-                let f = (len - p.link_dist) / len * alpha * l.strength;
-                d *= f;
-                self.vel[t] -= d * l.bias;
-                self.vel[s] += d * (1.0 - l.bias);
-            }
-            // gravity and group anchors
-            for &i in &self.active {
-                let i = i as usize;
-                let gk = if self.isolated[i] { 4.0 } else { 1.0 };
-                self.vel[i] -= pos[i] * (p.gravity * gk * alpha);
-                if let Some(a) = &self.anchors {
-                    if p.group_pull > 0.0 {
-                        self.vel[i] += (a[i] - pos[i]) * (p.group_pull * alpha);
-                    }
-                }
-            }
-            // integrate
-            let keep = 1.0 - p.friction;
-            let mut mean = V2::ZERO;
-            let mut any_pinned = false;
-            for &i in &self.active {
-                let i = i as usize;
-                if self.pinned[i] {
-                    any_pinned = true;
-                    self.vel[i] = V2::ZERO;
-                } else {
-                    self.vel[i] *= keep;
-                    pos[i] += self.vel[i];
-                }
-                if !pos[i].x.is_finite() || !pos[i].y.is_finite() {
-                    pos[i] = sunflower(i, 10.0);
-                    self.vel[i] = V2::ZERO;
-                }
-                mean += pos[i];
-            }
-            if !any_pinned {
-                mean /= self.active.len() as f32;
-                for &i in &self.active {
-                    pos[i as usize] -= mean;
-                }
-            }
-            self.ticks += 1;
+            self.finish_tick(pos, p);
         }
+    }
+
+    /// Work on the simulation for about `budget`, then stop where it is. A big layout needs far more than one
+    /// frame for a single iteration, so an iteration is done in slices over several frames and the window stays
+    /// responsive. Returns how many whole iterations were completed.
+    pub fn step_for(&mut self, pos: &mut [V2], p: &ForceParams, budget: std::time::Duration, max_ticks: usize) -> usize {
+        let start = std::time::Instant::now();
+        let mut done = 0;
+        while self.running && done < max_ticks {
+            if self.phase == Phase::Idle && !self.begin_tick(pos) {
+                break;
+            }
+            while self.phase == Phase::Forces {
+                self.force_block(p, 2048);
+                if self.phase == Phase::Forces && start.elapsed() >= budget {
+                    return done;
+                }
+            }
+            self.finish_tick(pos, p);
+            done += 1;
+            if start.elapsed() >= budget {
+                break;
+            }
+        }
+        done
+    }
+
+    /// Start an iteration: cool down, build the tree for the repulsion. False if the simulation is over.
+    fn begin_tick(&mut self, pos: &[V2]) -> bool {
+        if self.active.is_empty() {
+            self.running = false;
+            return false;
+        }
+        let decay = 1.0 - ALPHA_MIN.powf(1.0 / 300.0);
+        self.alpha -= self.alpha * decay;
+        if self.alpha < ALPHA_MIN {
+            self.running = false;
+            self.alpha = ALPHA_MIN;
+            return false;
+        }
+        self.tick_alpha = self.alpha;
+        let mut pts = std::mem::take(&mut self.pts);
+        pts.clear();
+        pts.extend(self.active.iter().map(|&i| (i, pos[i as usize])));
+        self.tree = Some(QuadTree::build(&pts, std::mem::take(&mut self.cells)));
+        self.pts = pts;
+        self.dv.clear();
+        self.cursor = 0;
+        self.phase = Phase::Forces;
+        true
+    }
+
+    /// Many-body repulsion (Barnes–Hut) for the next `max` nodes.
+    fn force_block(&mut self, p: &ForceParams, max: usize) {
+        let Some(tree) = self.tree.take() else {
+            self.phase = Phase::Idle;
+            return;
+        };
+        let (alpha, theta2) = (self.tick_alpha, p.theta * p.theta);
+        let end = self.cursor.saturating_add(max).min(self.pts.len());
+        let slice = &self.pts[self.cursor..end];
+        if slice.len() > 1500 {
+            self.dv.par_extend(slice.par_iter().map(|&(i, q)| tree.force(i, q, p.charge, alpha, theta2)));
+        } else {
+            self.dv.extend(slice.iter().map(|&(i, q)| tree.force(i, q, p.charge, alpha, theta2)));
+        }
+        self.cursor = end;
+        self.tree = Some(tree);
+        if self.cursor >= self.pts.len() {
+            self.phase = Phase::Finish;
+        }
+    }
+
+    /// Springs, gravity and the move, which complete the iteration.
+    fn finish_tick(&mut self, pos: &mut [V2], p: &ForceParams) {
+        if self.phase != Phase::Finish {
+            return;
+        }
+        self.phase = Phase::Idle;
+        let alpha = self.tick_alpha;
+        for (k, &(i, _)) in self.pts.iter().enumerate() {
+            self.vel[i as usize] += self.dv[k];
+        }
+        if let Some(t) = self.tree.take() {
+            self.cells = t.cells;
+        }
+        // springs
+        for l in &self.links {
+            let (s, t) = (l.s as usize, l.t as usize);
+            let mut d = pos[t] + self.vel[t] - pos[s] - self.vel[s];
+            if d.x == 0.0 {
+                d.x = jiggle(l.s, 3);
+            }
+            if d.y == 0.0 {
+                d.y = jiggle(l.t, 4);
+            }
+            let len = d.length();
+            let f = (len - p.link_dist) / len * alpha * l.strength;
+            d *= f;
+            self.vel[t] -= d * l.bias;
+            self.vel[s] += d * (1.0 - l.bias);
+        }
+        // gravity and group anchors
+        for &i in &self.active {
+            let i = i as usize;
+            let gk = if self.isolated[i] { 4.0 } else { 1.0 };
+            self.vel[i] -= pos[i] * (p.gravity * gk * alpha);
+            if let Some(a) = &self.anchors {
+                if p.group_pull > 0.0 {
+                    self.vel[i] += (a[i] - pos[i]) * (p.group_pull * alpha);
+                }
+            }
+        }
+        // integrate
+        let keep = 1.0 - p.friction;
+        let mut mean = V2::ZERO;
+        let mut any_pinned = false;
+        for &i in &self.active {
+            let i = i as usize;
+            if self.pinned[i] {
+                any_pinned = true;
+                self.vel[i] = V2::ZERO;
+            } else {
+                self.vel[i] *= keep;
+                pos[i] += self.vel[i];
+            }
+            if !pos[i].x.is_finite() || !pos[i].y.is_finite() {
+                pos[i] = sunflower(i, 10.0);
+                self.vel[i] = V2::ZERO;
+            }
+            mean += pos[i];
+        }
+        if !any_pinned {
+            mean /= self.active.len() as f32;
+            for &i in &self.active {
+                pos[i as usize] -= mean;
+            }
+        }
+        self.ticks += 1;
     }
 }
 
@@ -1068,7 +1160,7 @@ mod tests {
         for i in 0..150u32 {
             pts.push((i, V2::new(rnd(), rnd())));
         }
-        let tree = QuadTree::build(&pts);
+        let tree = QuadTree::build(&pts, Vec::new());
         for &(i, p) in pts.iter().take(10) {
             let bh = tree.force(i, p, 30.0, 1.0, 0.0);
             let mut brute = V2::ZERO;

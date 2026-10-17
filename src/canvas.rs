@@ -16,7 +16,19 @@ struct MeshSink {
     cur: Mesh,
 }
 
+/// Above this many edges the view is drawn thinner while it is being dragged or zoomed.
+const LOD_EDGES: usize = 40_000;
+/// Edges per piece when the mesh is built on several cores.
+const MESH_CHUNK: usize = 8192;
+
 impl MeshSink {
+    fn with_capacity(tex: TextureId, verts: usize, idx: usize) -> Self {
+        let mut cur = Mesh::with_texture(tex);
+        cur.vertices.reserve(verts.min(MAX_VERTS));
+        cur.indices.reserve(idx);
+        MeshSink { tex, done: vec![], cur }
+    }
+
     fn new(tex: TextureId) -> Self {
         MeshSink { tex, done: vec![], cur: Mesh::with_texture(tex) }
     }
@@ -87,15 +99,19 @@ impl MeshSink {
         }
     }
 
-    /// A filled quad (corners in order round the outline).
-    fn poly4(&mut self, p: [Pos2; 4], c: Color32) {
-        self.reserve(4);
-        let base = self.cur.vertices.len() as u32;
-        for q in p {
-            self.vert(q, WHITE_UV, c);
+    /// A filled convex polygon (corners in order round the outline), shifted by `off`.
+    fn fan(&mut self, pts: &[[f32; 2]], off: Vec2, c: Color32) {
+        if pts.len() < 3 {
+            return;
         }
-        self.tri(base, base + 1, base + 2);
-        self.tri(base, base + 2, base + 3);
+        self.reserve(pts.len());
+        let base = self.cur.vertices.len() as u32;
+        for q in pts {
+            self.vert(Pos2::new(q[0], q[1]) + off, WHITE_UV, c);
+        }
+        for k in 1..pts.len() as u32 - 1 {
+            self.tri(base, base + k, base + k + 1);
+        }
     }
 
     fn triangle(&mut self, p: [Pos2; 3], c: Color32) {
@@ -170,16 +186,10 @@ impl App {
             ui.ctx().request_repaint();
         }
         if self.s.sim.running && !self.sim_paused {
+            // a few milliseconds of layout per frame; a big layout takes several frames per iteration, so
+            // dragging and drawing stay smooth however large the graph is
             let params = self.s.layout.force.clone();
-            let t = std::time::Instant::now();
-            let mut ticks = 0;
-            while ticks < 4 && self.s.sim.running {
-                self.s.sim.step(&mut self.s.pos, &params, 1);
-                ticks += 1;
-                if t.elapsed().as_secs_f32() > 0.008 {
-                    break;
-                }
-            }
+            self.s.sim.step_for(&mut self.s.pos, &params, std::time::Duration::from_millis(6), 4);
             ui.ctx().request_repaint();
         }
     }
@@ -203,8 +213,12 @@ impl App {
             return;
         }
 
+        let t_sim = std::time::Instant::now();
         self.run_simulation(ui);
+        self.prof.add(0, t_sim);
+        let t_in = std::time::Instant::now();
         self.handle_input(ui, &resp, rect);
+        self.prof.add(1, t_in);
 
         // the 3D camera simply re-frames the visible nodes
         if self.auto_fit && self.s.is_3d() {
@@ -228,10 +242,21 @@ impl App {
 
         self.update_highlight();
         let hi = Highlight { focus: &self.focus, hood: &self.hood, active: self.hi_active };
+        // a huge graph is drawn thinner while it is dragged or zoomed, and in full as soon as the pointer rests
+        let moving = resp.dragged() || (resp.hovered() && ui.input(|i| i.smooth_scroll_delta != Vec2::ZERO));
+        let many = self.s.g.edges.len() / LOD_EDGES;
+        self.draw.edge_stride = if moving && many >= 1 { (many as u32 + 1).min(4) } else { 1 };
+        if self.draw.edge_stride > 1 {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+        }
+        let t_b = std::time::Instant::now();
         build_draw_list(&self.s, &self.cam, size, &hi, &mut self.draw);
+        self.prof.add(2, t_b);
+        let t_p = std::time::Instant::now();
         self.paint_graph(&painter, rect);
         self.paint_labels(&painter, rect);
         self.paint_overlays(&painter, rect);
+        self.prof.add(3, t_p);
 
         // tooltip
         if let (Some(h), None, None) = (self.hover, self.drag_node, self.box_start) {
@@ -483,8 +508,7 @@ impl App {
             if list.is_empty() {
                 continue;
             }
-            let mut sink = MeshSink::new(TextureId::default());
-            for e in list.iter() {
+            let fill = |sink: &mut MeshSink, e: &DrawEdge| {
                 let c = col(e.rgba);
                 sink.line(Pos2::new(e.a[0], e.a[1]) + off, Pos2::new(e.b[0], e.b[1]) + off, width, c, aa);
                 if arrows && e.directed {
@@ -492,9 +516,32 @@ impl App {
                         sink.triangle([Pos2::new(t[0][0], t[0][1]) + off, Pos2::new(t[1][0], t[1][1]) + off, Pos2::new(t[2][0], t[2][1]) + off], c);
                     }
                 }
-            }
-            for m in sink.finish() {
-                painter.add(Shape::mesh(m));
+            };
+            if list.len() >= 2 * MESH_CHUNK {
+                // build the pieces side by side, then add them in their original order
+                use rayon::prelude::*;
+                let pieces: Vec<Vec<Mesh>> = list
+                    .par_chunks(MESH_CHUNK)
+                    .map(|chunk| {
+                        let per = if aa { 8 } else { 4 };
+                        let mut sink = MeshSink::with_capacity(TextureId::default(), chunk.len() * per, chunk.len() * per * 3 / 2);
+                        for e in chunk {
+                            fill(&mut sink, e);
+                        }
+                        sink.finish()
+                    })
+                    .collect();
+                for m in pieces.into_iter().flatten() {
+                    painter.add(Shape::mesh(m));
+                }
+            } else {
+                let mut sink = MeshSink::new(TextureId::default());
+                for e in list.iter() {
+                    fill(&mut sink, e);
+                }
+                for m in sink.finish() {
+                    painter.add(Shape::mesh(m));
+                }
             }
         }
 
@@ -539,22 +586,25 @@ impl App {
             return;
         }
         let aa = self.draw.boxes.len() <= 2_000;
-        let mut sink = MeshSink::new(TextureId::default());
-        for b in &self.draw.boxes {
-            let p = |k: usize| Pos2::new(b.c[k][0], b.c[k][1]) + off;
+        let tex = TextureId::default();
+        let fill_box = |sink: &mut MeshSink, b: &DrawBox| {
             if b.fill > 0 {
                 let fill = Color32::from_rgba_unmultiplied(b.rgb[0], b.rgb[1], b.rgb[2], b.fill);
-                for f in &crate::boxes::FACES {
-                    sink.poly4([p(f[0]), p(f[1]), p(f[2]), p(f[3])], fill);
+                for poly in b.polygons() {
+                    sink.fan(poly, off, fill);
                 }
             }
             if b.line > 0 {
-                for &(a, c, f1, f2) in &crate::boxes::EDGES {
-                    let near = b.front[f1] || b.front[f2];
-                    let alpha = if near { b.line } else { (b.line as f32 * 0.4) as u8 };
-                    sink.line(p(a), p(c), b.width, Color32::from_rgba_unmultiplied(b.rgb[0], b.rgb[1], b.rgb[2], alpha), aa);
+                for (p, q, alpha) in b.lines() {
+                    let c = Color32::from_rgba_unmultiplied(b.rgb[0], b.rgb[1], b.rgb[2], alpha);
+                    sink.line(Pos2::new(p[0], p[1]) + off, Pos2::new(q[0], q[1]) + off, b.width, c, aa);
                 }
             }
+        };
+        // far-to-near order is kept: one mesh (split at the vertex limit) in drawing order
+        let mut sink = MeshSink::new(tex);
+        for b in &self.draw.boxes {
+            fill_box(&mut sink, b);
         }
         for m in sink.finish() {
             painter.add(Shape::mesh(m));

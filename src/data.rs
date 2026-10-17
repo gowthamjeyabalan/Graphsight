@@ -13,7 +13,94 @@ pub const NULL_CODE: u32 = u32::MAX;
 #[derive(Clone, Debug, Default)]
 pub struct RawTable {
     pub headers: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    pub rows: Rows,
+}
+
+/// The cells of a table packed into one text buffer: 4 bytes of bookkeeping per cell instead of a separate
+/// heap-allocated `String` (24 bytes plus the allocation) for each of them. Big files have millions of cells.
+#[derive(Clone, Debug, Default)]
+pub struct Rows {
+    text: String,
+    /// End offset of every cell in `text`, row after row.
+    ends: Vec<u32>,
+    ncol: usize,
+}
+
+impl Rows {
+    pub fn new(ncol: usize) -> Rows {
+        Rows { text: String::new(), ends: Vec::new(), ncol: ncol.max(1) }
+    }
+
+    /// Append one row; it is cut or padded with empty cells to the table's width.
+    pub fn push_row<S: AsRef<str>>(&mut self, cells: impl IntoIterator<Item = S>) {
+        let mut n = 0;
+        for c in cells.into_iter().take(self.ncol) {
+            self.text.push_str(c.as_ref());
+            self.ends.push(self.text.len() as u32);
+            n += 1;
+        }
+        for _ in n..self.ncol {
+            self.ends.push(self.text.len() as u32);
+        }
+    }
+
+    /// Release the spare room left over from growing the buffers.
+    pub fn finish(&mut self) {
+        self.text.shrink_to_fit();
+        self.ends.shrink_to_fit();
+    }
+
+    pub fn len(&self) -> usize {
+        self.ends.len() / self.ncol
+    }
+
+    #[inline]
+    pub fn cell(&self, r: usize, c: usize) -> &str {
+        let k = r * self.ncol + c;
+        let start = if k == 0 { 0 } else { self.ends[k - 1] as usize };
+        &self.text[start..self.ends[k] as usize]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Row<'_>> {
+        (0..self.len()).map(move |r| Row { rows: self, r })
+    }
+
+    /// Would the whole table still fit the 32-bit offsets?
+    fn fits(&self, extra: usize) -> bool {
+        self.text.len() + extra < u32::MAX as usize
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Row<'a> {
+    rows: &'a Rows,
+    r: usize,
+}
+
+impl<'a> Row<'a> {
+    pub fn get(&self, c: usize) -> Option<&'a str> {
+        (c < self.rows.ncol).then(|| self.rows.cell(self.r, c))
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = &'a str> {
+        let (rows, r) = (self.rows, self.r);
+        (0..rows.ncol).map(move |c| rows.cell(r, c))
+    }
+}
+
+impl std::ops::Index<usize> for Row<'_> {
+    type Output = str;
+    fn index(&self, c: usize) -> &str {
+        self.rows.cell(self.r, c)
+    }
+}
+
+impl<'a> IntoIterator for Row<'a> {
+    type Item = &'a str;
+    type IntoIter = Box<dyn Iterator<Item = &'a str> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
 }
 
 fn detect_delimiter(text: &str) -> u8 {
@@ -70,16 +157,18 @@ pub fn parse_csv_text(text: &str) -> Result<RawTable> {
         bail!("the file has no header row");
     }
     let ncol = headers.len();
-    let mut rows = Vec::new();
+    let mut rows = Rows::new(ncol);
     for rec in rdr.records() {
         let rec = rec?;
-        let mut row: Vec<String> = rec.iter().map(|s| s.to_string()).collect();
-        row.resize(ncol, String::new());
-        if row.iter().all(|c| c.trim().is_empty()) {
+        if rec.iter().all(|c| c.trim().is_empty()) {
             continue;
         }
-        rows.push(row);
+        if !rows.fits(rec.as_slice().len()) {
+            bail!("the file is too large (over 4 GB of text)");
+        }
+        rows.push_row(rec.iter());
     }
+    rows.finish();
     Ok(RawTable { headers, rows })
 }
 
@@ -472,14 +561,15 @@ fn objects_to_table(items: &[Vec<(String, String)>], lead: &[&str]) -> RawTable 
             }
         }
     }
-    let mut rows = Vec::with_capacity(items.len());
+    let mut rows = Rows::new(headers.len());
     for it in items {
         let mut row = vec![String::new(); headers.len()];
         for (k, v) in it {
             row[index[k]] = v.clone();
         }
-        rows.push(row);
+        rows.push_row(row);
     }
+    rows.finish();
     RawTable { headers, rows }
 }
 
@@ -666,12 +756,12 @@ mod tests {
     fn csv_basic_and_types() {
         let t = parse_csv_text("id,age,group\na,10,x\nb,,y\nc,30.5,x\n").unwrap();
         assert_eq!(t.rows.len(), 3);
-        let age: Vec<&str> = t.rows.iter().map(|r| r[1].as_str()).collect();
+        let age: Vec<&str> = t.rows.iter().map(|r| r.get(1).unwrap()).collect();
         let c = Column::from_strings("age", &age);
         assert!(c.is_numeric());
         assert_eq!(c.num(0), Some(10.0));
         assert_eq!(c.num(1), None);
-        let g: Vec<&str> = t.rows.iter().map(|r| r[2].as_str()).collect();
+        let g: Vec<&str> = t.rows.iter().map(|r| r.get(2).unwrap()).collect();
         let c = Column::from_strings("group", &g);
         assert!(!c.is_numeric());
         assert_eq!(c.cat_str(2), Some("x"));

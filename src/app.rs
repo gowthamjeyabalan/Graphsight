@@ -66,6 +66,7 @@ pub struct App {
     pub top_metric: Option<String>,
     pub sim_paused: bool,
     pub frame_ms: f32,
+    pub prof: crate::prof::Prof,
 }
 
 fn make_disc(size: usize) -> egui::ColorImage {
@@ -141,6 +142,7 @@ impl App {
             top_metric: Some("_pagerank".into()),
             sim_paused: false,
             frame_ms: 0.0,
+            prof: Default::default(),
         };
         if let Some(p) = args.project {
             app.open_project(&p);
@@ -681,6 +683,7 @@ impl App {
     pub fn ui_inner(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let t0 = std::time::Instant::now();
+        self.prof.frame_start();
         self.handle_drops(&ctx);
         self.handle_shortcuts(&ctx);
         self.update_window_title(&ctx);
@@ -692,6 +695,8 @@ impl App {
         self.dialogs(&ctx);
         let ms = t0.elapsed().as_secs_f32() * 1000.0;
         self.frame_ms = self.frame_ms * 0.9 + ms * 0.1;
+        self.prof.add(4, t0);
+        self.prof.frame_end(self.s.g.n(), self.s.g.edges.len(), self.draw.edges.len() + self.draw.edges_back.len() + self.draw.edges_hi.len());
     }
 }
 
@@ -710,13 +715,16 @@ mod ui_tests {
         t: f64,
         mods: Modifiers,
         applied: Modifiers,
+        last_verts: usize,
+        last_ui_ms: f64,
+        last_tess_ms: f64,
     }
 
     impl Harness {
         fn new() -> Self {
             let ctx = Context::default();
             let app = App::new_with_ctx(&ctx, Args { edges: None, nodes: None, json: None, directed: false, project: None });
-            Harness { ctx, app, t: 0.0, mods: Modifiers::NONE, applied: Modifiers::NONE }
+            Harness { ctx, app, t: 0.0, mods: Modifiers::NONE, applied: Modifiers::NONE, last_verts: 0, last_ui_ms: 0.0, last_tess_ms: 0.0 }
         }
 
         fn frame(&mut self, events: Vec<Event>) {
@@ -730,9 +738,13 @@ mod ui_tests {
                 self.applied = self.mods;
             }
             let app = &mut self.app;
+            let t_ui = std::time::Instant::now();
             let mut out = self.ctx.run_ui(input, |ui| app.ui_inner(ui));
+            self.last_ui_ms = t_ui.elapsed().as_secs_f64() * 1000.0;
             out.textures_delta.clear(); // not uploading anywhere; egui panics on dropping unapplied deltas
+            let t_tess = std::time::Instant::now();
             let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
+            self.last_tess_ms = t_tess.elapsed().as_secs_f64() * 1000.0;
             let mut verts = 0;
             for p in &prims {
                 if let egui::epaint::Primitive::Mesh(m) = &p.primitive {
@@ -741,6 +753,7 @@ mod ui_tests {
                 }
             }
             assert!(verts > 0, "nothing was drawn");
+            self.last_verts = verts;
         }
 
         fn frames(&mut self, n: usize) {
@@ -1154,5 +1167,163 @@ mod ui_tests {
         h.app.s.look.color_by = Some("_pagerank".into());
         h.app.restyle();
         println!("recolour: {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+    }
+
+    // ───────────── performance benchmark (ignored by default) ─────────────
+    // cargo test --release --bins perf_ -- --ignored --nocapture --test-threads=1
+
+    fn pct(v: &[f64], p: f64) -> f64 {
+        let mut s = v.to_vec();
+        s.sort_by(|a, b| a.total_cmp(b));
+        s[((s.len() as f64 - 1.0) * p) as usize]
+    }
+
+    thread_local! {
+        static UI_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+        static TESS_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    }
+
+    fn report(name: &str, phase: &str, ms: &[f64], verts: &[usize], ticks: usize) {
+        let (ui, tess) = (UI_MS.with(|c| c.replace(0.0)) / ms.len() as f64, TESS_MS.with(|c| c.replace(0.0)) / ms.len() as f64);
+        println!("BENCH {name} {phase} split: ui {ui:.2} ms, tessellate {tess:.2} ms");
+        let mean = ms.iter().sum::<f64>() / ms.len() as f64;
+        let over = ms.iter().filter(|m| **m > 16.7).count();
+        println!(
+            "BENCH {name} {phase}: mean {mean:.2} p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms | over16.7 {over}/{} | verts {} | layout_ticks {ticks}",
+            pct(ms, 0.5),
+            pct(ms, 0.95),
+            pct(ms, 0.99),
+            ms.iter().cloned().fold(0.0, f64::max),
+            ms.len(),
+            verts.iter().sum::<usize>() / verts.len().max(1)
+        );
+    }
+
+    fn run_bench(name: &str, load: impl FnOnce(&mut Harness), orbit: bool) {
+        let mut h = Harness::new();
+        let mb = |b: usize| b as f64 / 1048576.0;
+        let (heap0, _) = crate::alloc_track::now();
+        crate::alloc_track::reset_peak();
+        load(&mut h);
+        let (heap_loaded, peak_load) = crate::alloc_track::now();
+        h.frames(25);
+        let (heap_frames, _) = crate::alloc_track::now();
+        println!("BENCH {name} loaded: nodes {} edges {} | heap after load +{:.1} MB (peak while loading +{:.1} MB), after 25 frames +{:.1} MB", h.app.s.g.n(), h.app.s.g.edges.len(), mb(heap_loaded - heap0), mb(peak_load - heap0), mb(heap_frames - heap0));
+        crate::alloc_track::reset_peak();
+        let rect = h.app.canvas_rect;
+        let timed = |h: &mut Harness, events: Vec<Event>, ms: &mut Vec<f64>, verts: &mut Vec<usize>| {
+            let t = std::time::Instant::now();
+            h.frame(events);
+            ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            verts.push(h.last_verts);
+            UI_MS.with(|c| c.set(c.get() + h.last_ui_ms));
+            TESS_MS.with(|c| c.set(c.get() + h.last_tess_ms));
+        };
+        // pick the node closest to the middle of the canvas to grab
+        let mid = rect.center();
+        let grab = (0..h.app.s.g.n())
+            .min_by(|&a, &b| (h.node_screen_pos(a) - mid).length().total_cmp(&(h.node_screen_pos(b) - mid).length()))
+            .unwrap();
+        let gp = h.node_screen_pos(grab);
+        let empty = rect.min + Vec2::new(14.0, 14.0);
+        for (phase, start) in [("drag", if orbit { empty } else { gp }), ("pan", empty)] {
+            if phase == "drag" && orbit {
+                continue;
+            }
+            let (mut ms, mut verts) = (vec![], vec![]);
+            let ticks0 = h.app.s.sim.ticks;
+            h.frame(vec![Event::PointerMoved(start)]);
+            h.frame(vec![Event::PointerButton { pos: start, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+            for k in 0..150 {
+                let a = k as f32 * 0.12;
+                let p = start + Vec2::new(a.cos() * 40.0, a.sin() * 30.0) * if phase == "pan" { 1.0 } else { 0.5 };
+                timed(&mut h, vec![Event::PointerMoved(p)], &mut ms, &mut verts);
+            }
+            h.frame(vec![Event::PointerButton { pos: start, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+            report(name, if orbit && phase == "pan" { "orbit" } else { phase }, &ms, &verts, h.app.s.sim.ticks - ticks0);
+        }
+        let (mut ms, mut verts) = (vec![], vec![]);
+        h.frame(vec![Event::PointerMoved(mid)]);
+        for k in 0..90 {
+            let d = if (k / 15) % 2 == 0 { 40.0 } else { -40.0 };
+            let ev = if k % 3 == 0 { vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, d), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: Modifiers::NONE }] } else { vec![] };
+            timed(&mut h, ev, &mut ms, &mut verts);
+        }
+        report(name, "zoom", &ms, &verts, 0);
+        let (live_end, peak_end) = crate::alloc_track::now();
+        println!("BENCH {name} end: heap +{:.1} MB, peak during interaction +{:.1} MB", mb(live_end - heap0), mb(peak_end - heap0));
+    }
+
+    /// A reproducible random graph as CSV text (no files needed): `n` nodes in clusters, `m` edges, mostly local.
+    /// With `boxes` the nodes also carry a 3D position and a bounding box (min/max columns).
+    fn synth(n: usize, m: usize, boxes: bool) -> (String, String) {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut nodes = String::from(if boxes { "id,group,kind,score,x,y,z,x0,y0,z0,x1,y1,z1\n" } else { "id,group,kind,score,label_text\n" });
+        for i in 0..n {
+            let score = rnd() * 100.0;
+            if boxes {
+                let (x, y, z) = (rnd() * 300.0, rnd() * 300.0, rnd() * 60.0);
+                let (w, d, h) = (2.0 + rnd() * 7.0, 2.0 + rnd() * 7.0, 2.0 + rnd() * 4.0);
+                nodes += &format!("n{i},g{},k{},{score:.2},{x:.2},{y:.2},{z:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2}\n", (rnd() * 12.0) as u32, (rnd() * 5.0) as u32, x - w, y - d, z - h, x + w, y + d, z + h);
+            } else {
+                nodes += &format!("n{i},g{},k{},{score:.2},node number {i}\n", (rnd() * 24.0) as u32, (rnd() * 5.0) as u32);
+            }
+        }
+        let mut edges = String::from("source,target,weight\n");
+        for _ in 0..m {
+            let a = (rnd() * n as f64) as usize % n;
+            let b = if rnd() < 0.8 { (a + 1 + (rnd() * 59.0) as usize) % n } else { (rnd() * n as f64) as usize % n };
+            edges += &format!("n{a},n{b},{:.3}\n", rnd());
+        }
+        (nodes, edges)
+    }
+
+    fn load_synth(h: &mut Harness, n: usize, m: usize, boxes: bool) {
+        use crate::boxes::BoxSettings;
+        use crate::coords::CoordSettings;
+        let (nt, et) = synth(n, m, boxes);
+        let (nn, ee) = (parse_csv_text(&nt).unwrap(), parse_csv_text(&et).unwrap());
+        h.app.s.set_nodes("nodes".into(), nn.clone(), auto_node_mapping(&nn));
+        h.app.s.set_edges("edges".into(), ee.clone(), auto_edge_mapping(&ee));
+        h.app.rebuild();
+        if boxes {
+            let s = &mut h.app.s;
+            s.coords = CoordSettings { enabled: true, x: Some("x".into()), y: Some("y".into()), z: Some("z".into()), three_d: true, ..Default::default() };
+            s.apply_coords();
+            let c = |k: &str| Some(k.to_string());
+            s.boxes = BoxSettings { enabled: true, min: [c("x0"), c("y0"), c("z0")], max: [c("x1"), c("y1"), c("z1")], ..Default::default() };
+            s.recompute_boxes();
+            s.fit_cam3();
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_l() {
+        run_bench("L30k", |h| load_synth(h, 30_000, 100_000, false), false);
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_m() {
+        run_bench("M5k", |h| load_synth(h, 5_000, 15_000, false), false);
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_b700() {
+        run_bench("B700", |h| load_synth(h, 700, 699, true), true);
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_b5k() {
+        run_bench("B5k", |h| load_synth(h, 5_000, 15_000, true), true);
     }
 }

@@ -5,6 +5,7 @@ mod boxes;
 mod canvas;
 mod changes;
 mod config;
+mod prof;
 mod coords;
 mod data;
 mod dock;
@@ -300,6 +301,58 @@ fn main() -> Result<()> {
     };
     eframe::run_native("Grapht", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args))))).map_err(|e| anyhow::anyhow!("{e}"))
 }
+
+/// Counts heap use in the tests so the benchmarks can report exact numbers.
+#[cfg(test)]
+pub mod alloc_track {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    pub static LIVE: AtomicUsize = AtomicUsize::new(0);
+    pub static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct Track;
+
+    unsafe impl GlobalAlloc for Track {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            let p = unsafe { System.alloc(l) };
+            if !p.is_null() {
+                let now = LIVE.fetch_add(l.size(), Relaxed) + l.size();
+                PEAK.fetch_max(now, Relaxed);
+            }
+            p
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            unsafe { System.dealloc(p, l) };
+            LIVE.fetch_sub(l.size(), Relaxed);
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+            let q = unsafe { System.realloc(p, l, new) };
+            if !q.is_null() {
+                if new >= l.size() {
+                    let now = LIVE.fetch_add(new - l.size(), Relaxed) + (new - l.size());
+                    PEAK.fetch_max(now, Relaxed);
+                } else {
+                    LIVE.fetch_sub(l.size() - new, Relaxed);
+                }
+            }
+            q
+        }
+    }
+
+    /// (live bytes, peak bytes since the last `reset_peak`).
+    pub fn now() -> (usize, usize) {
+        (LIVE.load(Relaxed), PEAK.load(Relaxed))
+    }
+
+    pub fn reset_peak() {
+        PEAK.store(LIVE.load(Relaxed), Relaxed);
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static TRACKING: alloc_track::Track = alloc_track::Track;
 
 #[cfg(test)]
 mod icon_tests {

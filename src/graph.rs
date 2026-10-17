@@ -186,7 +186,7 @@ pub fn build_graph(
             if ci == m.src || ci == m.dst {
                 continue;
             }
-            let vals: Vec<&str> = kept_edge_rows.iter().map(|&r| t.rows[r][ci].as_str()).collect();
+            let vals: Vec<&str> = kept_edge_rows.iter().map(|&r| t.rows.cell(r, ci)).collect();
             let mut col = Column::from_strings(name, &vals);
             if Some(ci) == m.weight && !col.is_numeric() {
                 // force numeric for the weight column
@@ -208,7 +208,7 @@ pub fn build_graph(
             }
             let vals: Vec<&str> = node_row
                 .iter()
-                .map(|r| r.map(|r| t.rows[r][ci].as_str()).unwrap_or(""))
+                .map(|r| r.map(|r| t.rows.cell(r, ci)).unwrap_or(""))
                 .collect();
             g.node_cols.push(Column::from_strings(name, &vals));
         }

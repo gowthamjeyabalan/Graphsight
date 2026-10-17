@@ -442,8 +442,8 @@ impl Session {
 
     /// Rebuild the graph from the stored tables. Existing node positions are kept by id.
     pub fn rebuild(&mut self) {
-        let old: HashMap<String, V2> =
-            self.g.ids.iter().cloned().zip(self.pos.iter().copied()).collect();
+        // positions of the nodes we already know (borrowed names: no copy of every id)
+        let old: HashMap<&str, V2> = self.g.ids.iter().map(|s| s.as_str()).zip(self.pos.iter().copied()).collect();
         let g = build_graph(
             self.edge_src.as_ref().map(|s| (&s.table, &s.mapping)),
             self.node_src.as_ref().map(|s| (&s.table, &s.mapping)),
@@ -452,7 +452,7 @@ impl Session {
         let mut pos = initial_spiral(n);
         let mut known = 0usize;
         for (i, id) in g.ids.iter().enumerate() {
-            if let Some(p) = old.get(id) {
+            if let Some(p) = old.get(id.as_str()) {
                 pos[i] = *p;
                 known += 1;
             }
@@ -693,7 +693,9 @@ impl Session {
         }
     }
 
-    /// Point the 3D camera at the visible nodes and their boxes (the viewing angle stays as it is).
+    /// Point the 3D camera at the visible nodes and their boxes (the viewing angle stays as it is). Boxes that lie
+    /// far from the nodes (placeholder values such as -9999, a site outline) are left out of the framing, or one
+    /// of them would push the camera away until everything else shrinks to nothing.
     pub fn fit_cam3(&mut self) {
         let boxes_shown = self.boxes_shown();
         let mut pts: Vec<[f32; 3]> = if boxes_shown && !self.boxes.show_nodes {
@@ -702,13 +704,44 @@ impl Session {
             (0..self.g.n()).filter(|&i| self.vis[i]).map(|i| self.pos3[i]).collect()
         };
         if boxes_shown {
-            for b in self.box_items.iter().filter(|b| self.vis[b.node as usize]) {
-                pts.push(b.lo);
-                pts.push(b.hi);
+            let near = self.boxes_near_nodes();
+            let visible: Vec<usize> = (0..self.box_items.len()).filter(|&k| self.vis[self.box_items[k].node as usize]).collect();
+            // when most boxes sit around their nodes the odd ones out are ignored; when most do not, the boxes
+            // are somewhere else altogether (another origin or unit): frame the boxes, since that is what was asked for
+            let ignore_far = visible.iter().filter(|&&k| near[k]).count() * 2 >= visible.len();
+            if !ignore_far {
+                pts.clear();
+            }
+            for &k in &visible {
+                if !ignore_far || near[k] {
+                    pts.push(self.box_items[k].lo);
+                    pts.push(self.box_items[k].hi);
+                }
             }
         }
         let pts = if pts.is_empty() { self.pos3.clone() } else { pts };
         self.cam3.fit(&pts);
+    }
+
+    /// For each box: does it lie within (a generous margin around) the cloud of all nodes?
+    fn boxes_near_nodes(&self) -> Vec<bool> {
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for p in self.pos3.iter().filter(|p| p.iter().all(|v| v.is_finite())) {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        if lo[0] > hi[0] {
+            return vec![true; self.box_items.len()];
+        }
+        let ext = (0..3).map(|k| hi[k] - lo[k]).fold(0.0f32, f32::max);
+        let margin = ext * 0.35 + 1.0;
+        self.box_items
+            .iter()
+            .map(|b| (0..3).all(|k| b.lo[k] >= lo[k] - margin && b.hi[k] <= hi[k] + margin))
+            .collect()
     }
 
     /// Work out the bounding boxes again (after a setting, the coordinates or the data changed).
@@ -719,6 +752,7 @@ impl Session {
         };
         self.box_items = items;
         self.box_info = info;
+        self.box_info.n_far = self.boxes_near_nodes().iter().filter(|n| !**n).count();
     }
 
     /// True while bounding boxes are on screen (3D view, boxes on, at least one box).
@@ -1069,10 +1103,13 @@ pub struct DrawEdge {
     pub directed: bool,
 }
 
-/// A bounding box projected to the screen (3D only).
+/// A bounding box projected to the screen (3D only). Parts behind the camera are already cut away.
+#[derive(Clone)]
 pub struct DrawBox {
-    /// The eight corners (see `boxes::corner` for their order).
-    pub c: [[f32; 2]; 8],
+    /// The six faces (order of `boxes::FACES`) as screen polygons: the points and how many there are (0 = not seen).
+    pub faces: [([[f32; 2]; 8], usize); 6],
+    /// The twelve edges (order of `boxes::EDGES`); None if behind the camera.
+    pub edges: [Option<([f32; 2], [f32; 2])>; 12],
     /// Which faces look towards the camera.
     pub front: [bool; 6],
     pub rgb: [u8; 3],
@@ -1081,6 +1118,22 @@ pub struct DrawBox {
     pub line: u8,
     pub width: f32,
     pub depth: f32,
+}
+
+impl DrawBox {
+    /// The visible face polygons.
+    pub fn polygons(&self) -> impl Iterator<Item = &[[f32; 2]]> {
+        self.faces.iter().filter(|f| f.1 >= 3).map(|f| &f.0[..f.1])
+    }
+
+    /// The visible edges with their opacity: edges along the far side of the box are fainter.
+    pub fn lines(&self) -> impl Iterator<Item = ([f32; 2], [f32; 2], u8)> + '_ {
+        boxes::EDGES.iter().zip(self.edges.iter()).filter_map(|(&(_, _, f1, f2), e)| {
+            let (a, b) = (*e)?;
+            let alpha = if self.front[f1] || self.front[f2] { self.line } else { (self.line as f32 * 0.4) as u8 };
+            Some((a, b, alpha))
+        })
+    }
 }
 
 #[derive(Default)]
@@ -1093,6 +1146,8 @@ pub struct DrawList {
     pub edges: Vec<DrawEdge>,
     /// Highlighted attribute-change edges, thicker and drawn last.
     pub edges_hi: Vec<DrawEdge>,
+    /// Draw only every k-th edge (1 = all of them). Set by the caller while the view is being dragged or zoomed.
+    pub edge_stride: u32,
 }
 
 /// Focus/neighbourhood masks used to fade everything but a node and its neighbours.
@@ -1138,59 +1193,102 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
     }
     let depth_k = |d: f32, strength: f32| if threed && dmax > dmin { 1.0 - strength * ((d - dmin) / (dmax - dmin)).clamp(0.0, 1.0) } else { 1.0 };
 
-    // edges
+    // edges: split into chunks that rayon works on side by side; the chunks are joined in order, so the drawing
+    // order (and therefore the picture) does not depend on how many cores there are
     let base = s.look.edge_base();
     let ea = s.look.edge_alpha;
     let uniform = s.style.edge_rgb.is_none();
-    for (e, &(a, b)) in g.edges.iter().enumerate() {
+    // while the user drags or zooms a very large graph only every k-th edge is drawn, a little stronger
+    let stride = out.edge_stride.max(1) as usize;
+    let boost = (stride as f32).min(3.0);
+    let edge_one = |e: usize, a: u32, b: u32| -> Option<(DrawEdge, u8)> {
         let (ai, bi) = (a as usize, b as usize);
         if ai == bi {
-            continue;
+            return None;
         }
         let both = s.vis[ai] && s.vis[bi];
         if !both && !dim_hidden {
-            continue;
+            return None;
         }
-        let (Some((pa, _, da)), Some((pb, _, db))) = (pr[ai], pr[bi]) else { continue };
+        let (Some((pa, _, da)), Some((pb, _, db))) = (pr[ai], pr[bi]) else { return None };
         if (pa.x < 0.0 && pb.x < 0.0) || (pa.y < 0.0 && pb.y < 0.0) || (pa.x > size.x && pb.x > size.x) || (pa.y > size.y && pb.y > size.y) {
-            continue;
+            return None;
         }
         let mut alpha = ea;
-        let mut back = false;
-        let mut top = false;
+        let mut kind = 0u8; // 0 normal, 1 faded (drawn first), 2 highlighted (drawn last)
         if let (true, Some(ci)) = (both, &s.change_info) {
             if ci.edge_hi[e] {
-                top = true;
+                kind = 2;
             } else if s.change.only {
                 if !ci.edge_path[e] {
-                    continue;
+                    return None;
                 }
                 alpha *= 0.8; // a joining path: ordinary edge colour, a little softer
             } else {
                 alpha *= 0.1;
-                back = true;
+                kind = 1;
             }
         } else if !both {
             alpha *= 0.12;
-            back = true;
+            kind = 1;
         } else if hi.active && !(hi.focus[ai] || hi.focus[bi]) {
             alpha *= 0.12;
-            back = true;
+            kind = 1;
         } else if hi.active {
             alpha = (alpha * 2.5).clamp(0.5, 1.0);
+        }
+        if stride > 1 && kind != 2 {
+            if e % stride != 0 {
+                return None;
+            }
+            alpha = (alpha * boost).min(1.0);
         }
         if let Some(si) = &s.sub_info {
             if si.connector[ai] || si.connector[bi] {
                 alpha *= 0.7;
             }
         }
-        let c = if top { CHANGE_COLOR } else if uniform { base } else { s.style.edge_rgb.as_ref().unwrap()[e] };
+        let c = if kind == 2 { CHANGE_COLOR } else if uniform { base } else { s.style.edge_rgb.as_ref().unwrap()[e] };
         alpha *= depth_k((da + db) * 0.5, 0.5);
-        if top {
+        if kind == 2 {
             alpha = 0.95 * depth_k((da + db) * 0.5, 0.25);
         }
         let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi], directed: g.edge_directed(e) };
-        if top { out.edges_hi.push(de) } else if back { out.edges_back.push(de) } else { out.edges.push(de) }
+        Some((de, kind))
+    };
+    const CHUNK: usize = 8192;
+    if g.edges.len() < 2 * CHUNK {
+        for (e, &(a, b)) in g.edges.iter().enumerate() {
+            if let Some((de, kind)) = edge_one(e, a, b) {
+                match kind {
+                    2 => out.edges_hi.push(de),
+                    1 => out.edges_back.push(de),
+                    _ => out.edges.push(de),
+                }
+            }
+        }
+    } else {
+        use rayon::prelude::*;
+        let parts: Vec<[Vec<DrawEdge>; 3]> = g
+            .edges
+            .par_chunks(CHUNK)
+            .enumerate()
+            .map(|(ci, chunk)| {
+                let mut v: [Vec<DrawEdge>; 3] = [Vec::with_capacity(chunk.len()), Vec::new(), Vec::new()];
+                for (k, &(a, b)) in chunk.iter().enumerate() {
+                    if let Some((de, kind)) = edge_one(ci * CHUNK + k, a, b) {
+                        v[kind as usize].push(de);
+                    }
+                }
+                v
+            })
+            .collect();
+        out.edges.reserve(parts.iter().map(|p| p[0].len()).sum());
+        for [normal, faded, hot] in parts {
+            out.edges.extend(normal);
+            out.edges_back.extend(faded);
+            out.edges_hi.extend(hot);
+        }
     }
 
     // nodes (faded first, then normal)
@@ -1245,56 +1343,83 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
 fn build_boxes(s: &Session, o: &Orbit, size: V2, hi: &Highlight, out: &mut DrawList) {
     let st = &s.boxes;
     let ink = |a: f32, k: f32| (a.clamp(0.0, 1.0) * k.clamp(0.0, 1.0) * 255.0).round() as u8;
-    for b in &s.box_items {
+    use rayon::prelude::*;
+    // every box is projected on its own, so thousands of them are spread over the cores (order is kept); a few
+    // hundred are quicker on one thread than the hand-over costs
+    let project = |b: &BoxItem| -> Option<DrawBox> {
         let i = b.node as usize;
         if !s.vis[i] {
-            continue;
+            return None;
         }
-        let mut c = [[0.0f32; 2]; 8];
-        let mut depth = 0.0;
-        let mut ok = true;
-        for k in 0..8 {
-            match o.project(boxes::corner(b, k)) {
-                Some((p, _, d)) => {
-                    c[k] = [p.x, p.y];
-                    depth += d * 0.125;
-                }
-                None => {
-                    ok = false;
-                    break;
-                }
+        // the eight corners; whatever is behind the camera is cut off at the near plane
+        let corners: [[f32; 3]; 8] = std::array::from_fn(|k| boxes::corner(b, k));
+        let mut faces = [([[0.0f32; 2]; 8], 0usize); 6];
+        let mut edges: [Option<([f32; 2], [f32; 2])>; 12] = [None; 12];
+        let (mut x0, mut x1, mut y0, mut y1) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+        let mut seen = |p: V2| {
+            x0 = x0.min(p.x);
+            x1 = x1.max(p.x);
+            y0 = y0.min(p.y);
+            y1 = y1.max(p.y);
+        };
+        for (f, face) in boxes::FACES.iter().enumerate() {
+            let quad = [corners[face[0]], corners[face[1]], corners[face[2]], corners[face[3]]];
+            let (pts, n) = o.clip_polygon(&quad);
+            for k in 0..n {
+                faces[f].0[k] = [pts[k].x, pts[k].y];
+                seen(pts[k]);
+            }
+            faces[f].1 = n;
+        }
+        for (e, &(a, c, _, _)) in boxes::EDGES.iter().enumerate() {
+            if let Some((p, q)) = o.clip_segment(corners[a], corners[c]) {
+                edges[e] = Some(([p.x, p.y], [q.x, q.y]));
+                seen(p);
+                seen(q);
             }
         }
-        if !ok {
-            continue; // part of the box is behind the camera
+        if !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) {
+            return None; // all of it is behind the camera
         }
-        let (mut x0, mut x1, mut y0, mut y1) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
-        for p in &c {
-            x0 = x0.min(p[0]);
-            x1 = x1.max(p[0]);
-            y0 = y0.min(p[1]);
-            y1 = y1.max(p[1]);
+        if x0.abs().max(x1.abs()).max(y0.abs()).max(y1.abs()) > 1.0e7 {
+            return None; // numbers this large are not safe to draw
         }
         if x1 < 0.0 || y1 < 0.0 || x0 > size.x || y0 > size.y {
-            continue;
+            return None;
         }
+        let centre = [0, 1, 2].map(|k| (b.lo[k] + b.hi[k]) * 0.5);
+        let depth = ((centre[0] - o.eye[0]).powi(2) + (centre[1] - o.eye[1]).powi(2) + (centre[2] - o.eye[2]).powi(2)).sqrt();
+        // a box much bigger than the view (a site outline) would tint everything: draw only its outline
+        let giant = (x1 - x0) > size.x * 4.0 || (y1 - y0) > size.y * 4.0;
         let selected = s.sel[i];
         let fade = if hi.active && !hi.hood[i] { 0.25 } else { 1.0 };
         let rgb = match st.color_mode {
             boxes::BoxColor::Single => st.color,
             boxes::BoxColor::Node => s.style.node_rgb[i],
         };
-        out.boxes.push(DrawBox {
-            c,
+        Some(DrawBox {
+            faces,
+            edges,
             front: boxes::front_faces(b, o.eye),
             rgb,
-            fill: ink(if selected { (st.fill * 1.8).max(0.12) } else { st.fill }, fade),
+            fill: if giant { 0 } else { ink(if selected { (st.fill * 1.8).max(0.12) } else { st.fill }, fade) },
             line: ink(if selected { 1.0 } else { st.outline }, fade),
             width: st.line_width * if selected { 1.8 } else { 1.0 },
             depth,
-        });
+        })
+    };
+    if s.box_items.len() >= 1500 {
+        // thousands of boxes: projected side by side. Only the (depth, index) pairs are sorted, because the boxes
+        // are large; they are copied once, in order
+        let made: Vec<DrawBox> = s.box_items.par_iter().filter_map(project).collect();
+        let mut order: Vec<(f32, u32)> = made.iter().enumerate().map(|(k, b)| (b.depth, k as u32)).collect();
+        order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        out.boxes.extend(order.iter().map(|&(_, k)| made[k as usize].clone()));
+    } else {
+        // a few hundred are quicker on one thread, and without the extra copy
+        out.boxes.extend(s.box_items.iter().filter_map(project));
+        out.boxes.sort_by(|a, b| b.depth.total_cmp(&a.depth)); // far to near
     }
-    out.boxes.sort_by(|a, b| b.depth.total_cmp(&a.depth));
 }
 
 /// Index of the visible node under `p` (screen space). In 2D the top-most (last drawn) wins, in 3D the nearest.
