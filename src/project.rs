@@ -40,6 +40,7 @@ pub struct ProjectFile {
     pub filter: FilterState,
     pub change: crate::changes::ChangeSettings,
     pub sub: crate::subgraph::SubSettings,
+    pub query: crate::query::QuerySettings,
     pub coords: crate::coords::CoordSettings,
     pub boxes: crate::boxes::BoxSettings,
     pub cam3: crate::coords::Cam3,
@@ -66,6 +67,7 @@ impl Default for ProjectFile {
             filter: FilterState::default(),
             change: Default::default(),
             sub: Default::default(),
+            query: Default::default(),
             coords: Default::default(),
             boxes: Default::default(),
             cam3: Default::default(),
@@ -141,6 +143,7 @@ impl App {
             filter: s.filter.clone(),
             change: s.change.clone(),
             sub: s.sub.clone(),
+            query: s.query.clone(),
             coords: s.coords.clone(),
             boxes: s.boxes.clone(),
             cam3: s.cam3,
@@ -209,6 +212,7 @@ impl App {
         self.s.filter = FilterState::default();
         self.s.change = Default::default();
         self.s.sub = Default::default();
+        self.s.query = Default::default();
         self.s.coords = Default::default();
         self.s.boxes = Default::default();
         self.table.sort = None;
@@ -303,6 +307,7 @@ impl App {
         self.s.filter = pf.filter.clone();
         self.s.change = pf.change.clone();
         self.s.sub = pf.sub.clone();
+        self.s.query = pf.query.clone();
         self.s.coords = pf.coords.clone();
         self.s.boxes = pf.boxes.clone();
         self.rebuild();

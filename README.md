@@ -35,12 +35,12 @@ The first build downloads and compiles ~450 crates (several minutes); later buil
 ## Workspace, panels and sessions
 
 The window is a docking workspace in an Apple-style dark theme (Inter typeface). The default arrangement:
-Data / Layout / Appearance / Subgraph tabs and Filter / Analysis tabs on the left, the graph in the middle, the node table
+Data / Layout / Appearance / Subgraph tabs and Filter / Analysis / Query tabs on the left, the graph in the middle, the node table
 along the bottom, and the inspector and legend on the right.
 
 * **Move panels:** drag a tab by its title onto another panel to tab them together, or onto an edge to split; drag the
   dividers to resize. Right-click a tab for *Close panel*; bring panels back with **View ▸ Panels**.
-  **View ▸ Reset panel layout** restores the default. The arrangement is saved automatically (in
+  **View ▸ Reset panel layout** restores the default (use it, or View ▸ Panels ▸ Query, if you saved a layout before the Query panel existed). The arrangement is saved automatically (in
   `%APPDATA%\Grapht\layout.json`) and restored at the next start.
 * **Sessions:** **File ▸ Save session** (Ctrl+S) writes a `.grapht` file with the loaded files and column mappings,
   all appearance / layout / filter settings, node positions and pins, the selection, hand-hidden nodes, the table
@@ -82,10 +82,27 @@ that one), and can show only the changes, also joined into one graph. Both respe
 **Node coordinates and 3D** — in the *Layout* tab, *Place nodes by coordinates* puts every node at the X / Y values
 stored in two numeric attributes (columns named x, y, z, lon, lat … are picked automatically), instead of running a
 layout. Add a Z column and a *2D / 3D orbit* switch appears. The 3D view is a perspective camera: drag to orbit,
-right-drag to pan, scroll to zoom, Top / Front / Side / Perspective presets, double-click empty space or `F` to fit,
+middle- or right-drag (or Space + drag) to pan, scroll to zoom towards the cursor, Top / Front / Side / Iso views, perspective or orthographic projection, double-click empty space or `F` to fit,
 an axes gizmo in the corner, and nearer nodes drawn on top. Colour, size, filters, subgraphs and change highlighting
 all work in 3D; clicking and Shift-drag selection work on what you see. Layouts and dragging nodes are off while
 coordinates are used; switching them off brings the previous layout back.
+
+**View toolbar** — floating buttons at the bottom of the graph: *zoom to fit* (`F`), *zoom to selection* (`S`, greyed
+out until visible nodes are selected; one node is centred at a readable zoom, a group fills the view with padding),
+*zoom to region* (`R`, then drag a rectangle; `Esc` cancels; it switches itself off after one use), *zoom in / out*,
+*reset view* (`Home`) and *previous / next view* (`Alt+←` / `Alt+→`, a history that remembers each place the view came
+to rest). In 3D a second row adds the drag mode (orbit / pan / zoom), Top / Front / Side / Iso views and a
+perspective / orthographic switch. Camera moves glide (about 0.3 s; **View ▸ Animate view changes** turns that off) and
+stop as soon as you scroll or drag. The view history is not saved in sessions; the camera and projection are.
+
+**Connection query** — the *Query* tab answers “how many X are connected to Y?”. Pick the first group (an attribute
+and *is / is not / < / > / contains / starts with / is empty …*, or any node, or the node id), pick the second group,
+and choose whether a connection has to run *either way*, *first → second* or *second → first* (undirected edges count
+both ways). It says, for example, “2 of 4 Room nodes connect to Sensor nodes.” and “2 have no connection to Sensor
+nodes.”; click a sentence, or the buttons under it, to select those nodes. *Only visible nodes* respects the filter and
+subgraph. *Cross-tab* mode counts the connections between every value of one attribute and every value of another
+(up to 40 values each) as a shaded grid; click a cell to select the nodes at both ends. The query is saved in the
+session.
 
 **Bounding boxes** — while the 3D view is on, a *Bounding boxes* block appears under the coordinates. Choose the six
 numeric attributes that hold each node's box (minimum and maximum of X, Y and Z, in the same units as the
@@ -118,7 +135,10 @@ grapht --help
 | `graph.rs` | graph construction, adjacency, metrics (PageRank, k-core, components, Louvain) |
 | `expr.rs` | filter expression parser/evaluator |
 | `changes.rs` | finds the connections where an attribute changes, with per-value counts |
-| `coords.rs` | node coordinates → positions, the 3D orbit camera and its projection |
+| `coords.rs` | node coordinates → positions, the 3D orbit camera (perspective / orthographic) and its projection |
+| `query.rs` | the connection query: group conditions, direction, counts, cross-tab |
+| `view.rs` | view tools: zoom to fit / selection / region, animated camera moves, view history |
+| `toolbar.rs` | the floating view toolbar and its painter-drawn icons |
 | `boxes.rs` | bounding boxes: the six min/max columns, which nodes get a box, box geometry |
 | `subgraph.rs` | attribute sub-graphs, N-hop neighbours, joining separate pieces by shortest paths |
 | `layout.rs` | static layouts and the Barnes–Hut force simulation |
@@ -132,7 +152,7 @@ grapht --help
 | `.github/workflows/release.yml` | tests, then builds the Windows exe and publishes a GitHub release when a `v*` tag is pushed |
 | `vendor/egui_dock` | the `egui_dock` docking crate (MIT), ported to egui 0.37 (one-line change) |
 
-`cargo test --release` runs the unit tests (60+), including headless UI tests that feed pointer, wheel and keyboard events
+`cargo test --release` runs the unit tests (130+), including headless UI tests that feed pointer, wheel and keyboard events
 through the real egui code and validate the generated meshes. `cargo test --release bench -- --ignored --nocapture`
 prints the large-graph timings.
 
