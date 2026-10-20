@@ -139,13 +139,15 @@ pub struct Cam3 {
     pub yaw: f32,
     /// Elevation of the camera above the horizon, radians (positive = looking down).
     pub pitch: f32,
-    /// Distance from the target.
+    /// Distance from the target. (In orthographic view it only sets the scale.)
     pub dist: f32,
+    /// Orthographic projection: no perspective shrinking, parallel lines stay parallel.
+    pub ortho: bool,
 }
 
 impl Default for Cam3 {
     fn default() -> Self {
-        Cam3 { target: [0.0; 3], yaw: 0.45, pitch: 0.4, dist: 1000.0 }
+        Cam3 { target: [0.0; 3], yaw: 0.45, pitch: 0.4, dist: 1000.0, ortho: false }
     }
 }
 
@@ -176,6 +178,9 @@ pub struct Orbit {
     pub size: V2,
     /// Nearest distance in front of the camera that is drawn (for clipping boxes that reach past the camera).
     pub near: f32,
+    /// Orthographic: every depth has the same scale, `focal / dist`.
+    pub ortho: bool,
+    pub dist: f32,
 }
 
 impl Cam3 {
@@ -193,8 +198,65 @@ impl Cam3 {
         let fwd = norm(sub(t, eye));
         let right = norm(cross(fwd, [0.0, 0.0, 1.0]));
         let up = cross(right, fwd);
-        let focal = (size.x.min(size.y) * 0.5) / (FOV * 0.5).tan();
-        Orbit { eye, right, up, fwd, focal, size, near: (self.dist * 0.02).max(1e-3) }
+        let focal = Self::focal_for(size);
+        // orthographic: nothing is cut off in front of the camera, even what lies behind the eye
+        let near = if self.ortho { -1e30 } else { (self.dist * 0.02).max(1e-3) };
+        Orbit { eye, right, up, fwd, focal, size, near, ortho: self.ortho, dist: self.dist }
+    }
+
+    /// Focal length in pixels for a canvas of this size.
+    pub fn focal_for(size: V2) -> f32 {
+        (size.x.min(size.y) * 0.5) / (FOV * 0.5).tan()
+    }
+
+    /// Frame these points with padding, keeping the viewing angle: the target moves to the middle of their box and
+    /// the camera backs off just far enough for all of them to be on screen. Never closer than `max_zoom`
+    /// pixels per unit, so a few nodes on top of each other do not zoom in without end.
+    pub fn frame_group(&mut self, pts: &[V3], size: V2, max_zoom: f32) {
+        if pts.is_empty() {
+            return;
+        }
+        let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for p in pts {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        self.target = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+        let o = self.orbit(size);
+        let focal = o.focal;
+        let (hw, hh) = (size.x * 0.5 * 0.8, size.y * 0.5 * 0.8);
+        let mut need = focal / max_zoom;
+        for p in pts {
+            let d = sub(*p, self.target);
+            let (x, y, dz) = (dot(d, o.right).abs(), dot(d, o.up).abs(), dot(d, o.fwd));
+            let dz = if self.ortho { 0.0 } else { dz };
+            need = need.max(focal * x / hw - dz).max(focal * y / hh - dz).max(-dz / 0.9);
+        }
+        self.dist = need;
+    }
+
+    /// Zoom so that the (canvas-local, from the middle) rectangle fills the view.
+    pub fn zoom_to_rect(&mut self, centre: V2, rect_size: V2, size: V2) {
+        let o = self.orbit(size);
+        let f = o.focal / self.dist;
+        for k in 0..3 {
+            self.target[k] += o.right[k] * (centre.x / f) - o.up[k] * (centre.y / f);
+        }
+        let k = (size.x / rect_size.x.max(1.0)).min(size.y / rect_size.y.max(1.0));
+        self.dist /= k;
+    }
+
+    /// Zoom by `factor` keeping the point under the cursor (canvas-local, from the middle) where it is.
+    pub fn zoom_at(&mut self, factor: f32, cursor: V2, size: V2) {
+        let o = self.orbit(size);
+        let f = o.focal / self.dist;
+        let f2 = f * factor;
+        for k in 0..3 {
+            self.target[k] += o.right[k] * (cursor.x / f - cursor.x / f2) - o.up[k] * (cursor.y / f - cursor.y / f2);
+        }
+        self.dist /= factor;
     }
 
     /// Look from a fixed direction. `Top` looks straight down (x right, y up).
@@ -231,7 +293,7 @@ impl Cam3 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum View3 {
     Top,
     Front,
@@ -246,10 +308,10 @@ impl Orbit {
     pub fn project(&self, p: V3) -> Option<(V2, f32, f32)> {
         let d = sub(p, self.eye);
         let cz = dot(d, self.fwd);
-        if cz < 1e-3 {
+        if !self.ortho && cz < 1e-3 {
             return None;
         }
-        let f = self.focal / cz;
+        let f = if self.ortho { self.focal / self.dist } else { self.focal / cz };
         Some((V2::new(self.size.x * 0.5 + dot(d, self.right) * f, self.size.y * 0.5 - dot(d, self.up) * f), f, cz))
     }
 
@@ -262,7 +324,7 @@ impl Orbit {
 
     #[inline]
     fn cam_to_screen(&self, c: V3) -> V2 {
-        let f = self.focal / c[2];
+        let f = if self.ortho { self.focal / self.dist } else { self.focal / c[2] };
         V2::new(self.size.x * 0.5 + c[0] * f, self.size.y * 0.5 - c[1] * f)
     }
 
@@ -374,7 +436,7 @@ mod tests {
     #[test]
     fn projection_basics() {
         let size = V2::new(800.0, 600.0);
-        let mut cam = Cam3 { target: [0.0; 3], yaw: 0.0, pitch: 0.0, dist: 100.0 };
+        let mut cam = Cam3 { target: [0.0; 3], yaw: 0.0, pitch: 0.0, dist: 100.0, ortho: false };
         let o = cam.orbit(size);
         let (c, _, depth) = o.project([0.0; 3]).unwrap();
         assert!((c - size * 0.5).length() < 1e-3);
@@ -492,7 +554,7 @@ mod tests {
     #[test]
     fn clipping_cuts_at_the_near_plane() {
         let size = V2::new(800.0, 600.0);
-        let cam = Cam3 { target: [0.0; 3], yaw: 0.0, pitch: 0.0, dist: 100.0 };
+        let cam = Cam3 { target: [0.0; 3], yaw: 0.0, pitch: 0.0, dist: 100.0, ortho: false };
         let o = cam.orbit(size);
         // the camera looks along +y from y = -100; near is 2 units in front of it
         assert!((o.near - 2.0).abs() < 1e-4);

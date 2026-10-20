@@ -40,6 +40,7 @@ pub struct App {
     pub auto_fit: bool,
     pub canvas_size: Vec2,
     pub canvas_rect: egui::Rect,
+    pub view: crate::view::ViewCtl,
     pub draw: DrawList,
     pub tex: Textures,
     pub focus: Vec<bool>,
@@ -117,6 +118,7 @@ impl App {
             auto_fit: true,
             canvas_size: Vec2::new(1000.0, 700.0),
             canvas_rect: egui::Rect::NOTHING,
+            view: Default::default(),
             draw: DrawList::default(),
             tex,
             focus: vec![],
@@ -178,6 +180,9 @@ impl App {
         self.hover = None;
         self.drag_node = None;
         self.auto_fit = true;
+        self.view.anim = None;
+        self.view.hist.clear();
+        self.view.cancel_region();
     }
 
     pub fn refilter(&mut self) {
@@ -269,7 +274,7 @@ impl App {
         self.rebuild();
     }
 
-    fn pick_and_load(&mut self, hint: Option<PendKindHint>) {
+    pub fn pick_and_load(&mut self, hint: Option<PendKindHint>) {
         let mut d = rfd::FileDialog::new().add_filter("Tables and graphs", &["csv", "tsv", "txt", "json"]);
         if matches!(hint, Some(PendKindHint::Edges)) {
             d = d.set_title("Open edges file (source, target, …)");
@@ -502,9 +507,22 @@ impl App {
                     self.restyle();
                 }
                 ui.separator();
+                ui.checkbox(&mut self.settings.animate_view, "Animate view changes");
                 if ui.button("Fit graph to window   (F)").clicked() {
                     ui.close();
-                    self.auto_fit = true;
+                    self.run_tool(crate::view::Tool::Fit);
+                }
+                if ui.add_enabled(self.tool_enabled(crate::view::Tool::Selection), egui::Button::new("Zoom to selection   (S)")).clicked() {
+                    ui.close();
+                    self.run_tool(crate::view::Tool::Selection);
+                }
+                if ui.button("Zoom to region   (R)").clicked() {
+                    ui.close();
+                    self.run_tool(crate::view::Tool::Region);
+                }
+                if ui.button("Reset view   (Home)").clicked() {
+                    ui.close();
+                    self.run_tool(crate::view::Tool::Home);
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -638,7 +656,14 @@ impl App {
             ui.label("• Drag a node to move it (all selected nodes move together)");
             ui.label("• Shift + drag on empty space: box-select (Ctrl keeps the current selection)");
             ui.label("• Double-click a node: select it and its neighbours");
-            ui.label("• F fit · Esc clear selection · Del hide selected · Ctrl+A select visible · Space pause/resume layout");
+            ui.label("• Middle- or right-drag, or hold Space and drag: pan (3D: also orbit / pan / zoom drag modes in the toolbar)");
+            ui.label("• Esc clear selection · Del hide selected · Ctrl+A select visible · Space (tap) pause/resume layout");
+            ui.add_space(6.0);
+            ui.strong("View toolbar (bottom of the graph)");
+            ui.label("• F fit all visible nodes · S zoom to selection · R zoom to region (drag a rectangle; Esc cancels)");
+            ui.label("• Zoom in / out · Home reset view · Alt+← / Alt+→ previous / next view");
+            ui.label("• 3D: Top / Front / Side / Iso views, perspective or orthographic projection");
+            ui.label("• View ▸ Animate view changes turns the camera glide on or off");
             ui.add_space(6.0);
             ui.strong("Filter expressions");
             ui.monospace("age > 30 and (group == \"A\" or group in [\"B\", \"C\"])");
@@ -990,6 +1015,313 @@ mod ui_tests {
         h.frame(vec![key(egui::Key::Escape, Modifiers::NONE)]);
         h.frames(1);
         assert_eq!(h.app.s.sel_count, 0);
+    }
+
+    // ───────────────────────── view toolbar ─────────────────────────
+
+    use crate::view::{NavMode, Tool};
+
+    fn key_ev(k: egui::Key, pressed: bool) -> Event {
+        Event::Key { key: k, physical_key: Some(k), pressed, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    fn grid_harness() -> Harness {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.app.s.layout.kind = crate::layout::LayoutKind::Grid;
+        h.app.s.apply_layout_now();
+        h.frames(80);
+        h
+    }
+
+    fn harness_3d() -> Harness {
+        use crate::data::*;
+        let mut h = Harness::new();
+        let mut nodes = String::from("id,x,y,z\n");
+        let mut edges = String::from("source,target\n");
+        for i in 0..60 {
+            nodes += &format!("n{i},{},{},{}\n", (i % 10) * 10, (i / 10) * 10, (i % 7) * 5);
+            if i > 0 {
+                edges += &format!("n{},n{}\n", i - 1, i);
+            }
+        }
+        let (e, n) = (parse_csv_text(&edges).unwrap(), parse_csv_text(&nodes).unwrap());
+        let em = auto_edge_mapping(&e);
+        h.app.s.set_edges("e".into(), e, em);
+        let nm = auto_node_mapping(&n);
+        h.app.s.set_nodes("n".into(), n, nm);
+        h.app.s.layout.kind = crate::layout::LayoutKind::Grid;
+        h.app.rebuild();
+        h.app.s.coords = crate::coords::CoordSettings { enabled: true, x: Some("x".into()), y: Some("y".into()), z: Some("z".into()), three_d: true, ..Default::default() };
+        h.app.s.apply_coords();
+        h.app.auto_fit = true;
+        h.frames(60);
+        assert!(h.app.s.is_3d());
+        h
+    }
+
+    impl Harness {
+        fn tool(&self, t: Tool) -> Option<(egui::Rect, bool)> {
+            self.app.view.buttons.iter().find(|(x, _, _)| *x == t).map(|(_, r, e)| (*r, *e))
+        }
+
+        fn click_tool(&mut self, t: Tool) {
+            let (r, _) = self.tool(t).unwrap_or_else(|| panic!("no {t:?} button"));
+            self.click(r.center(), Modifiers::NONE);
+            self.frames(40); // the camera glides for about 0.3 s
+        }
+
+        fn drag(&mut self, a: Pos2, b: Pos2) {
+            self.frame(vec![Event::PointerMoved(a)]);
+            self.frame(vec![Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+            self.frame(vec![Event::PointerMoved((a + b.to_vec2()) * 0.5)]);
+            self.frame(vec![Event::PointerMoved(b)]);
+            self.frame(vec![Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+            self.frames(2);
+        }
+
+        fn press(&mut self, k: egui::Key) {
+            self.frame(vec![key_ev(k, true)]);
+            self.frame(vec![key_ev(k, false)]);
+            self.frames(40);
+        }
+    }
+
+    #[test]
+    fn toolbar_has_the_usual_buttons_and_greys_out_what_does_not_apply() {
+        let h = grid_harness();
+        for t in [Tool::Fit, Tool::Selection, Tool::Region, Tool::ZoomIn, Tool::ZoomOut, Tool::Home, Tool::Back, Tool::Forward] {
+            assert!(h.tool(t).is_some(), "{t:?} missing");
+        }
+        assert!(!h.tool(Tool::Selection).unwrap().1, "nothing selected: zoom to selection is greyed out");
+        assert!(!h.tool(Tool::Back).unwrap().1 && !h.tool(Tool::Forward).unwrap().1, "no history yet");
+        assert!(h.tool(Tool::Fit).unwrap().1 && h.tool(Tool::Region).unwrap().1);
+        assert!(h.tool(Tool::Perspective).is_none() && h.tool(Tool::Preset(crate::coords::View3::Top)).is_none(), "3D tools are hidden in 2D");
+        let bar = h.app.view.toolbar_rect.unwrap();
+        let c = h.app.canvas_rect;
+        assert!(c.contains_rect(bar) && bar.bottom() > c.bottom() - 40.0, "floats at the bottom of the graph");
+        assert!((bar.center().x - c.center().x).abs() < 2.0, "in the middle");
+        assert!(h.app.view.over_toolbar(bar.center()) && !h.app.view.over_toolbar(c.center()));
+    }
+
+    #[test]
+    fn zoom_to_selection_button_centres_the_node_and_keeps_the_selection() {
+        let mut h = grid_harness();
+        h.app.s.select_only(500);
+        h.frames(2);
+        assert!(h.tool(Tool::Selection).unwrap().1);
+        let before = h.app.cam.zoom;
+        h.click_tool(Tool::Selection);
+        assert_eq!(h.app.s.sel_count, 1, "clicking the toolbar must not clear the selection");
+        assert!((h.app.cam.center - h.app.s.pos[500]).length() < 0.5, "{:?} vs {:?}", h.app.cam.center, h.app.s.pos[500]);
+        assert!(h.app.cam.zoom > before && (1.5..=6.0).contains(&h.app.cam.zoom), "zoom {} -> {}", before, h.app.cam.zoom);
+        assert!(!h.app.auto_fit);
+        // a group: both nodes end up on screen
+        let r = h.app.canvas_rect;
+        h.app.s.select_nodes([0usize, 1199]);
+        h.frames(2);
+        h.click_tool(Tool::Selection);
+        for i in [0usize, 1199] {
+            let p = h.node_screen_pos(i);
+            assert!(r.contains(p), "node {i} at {p:?} outside {r:?}");
+        }
+    }
+
+    #[test]
+    fn keyboard_shortcuts_s_and_home_and_f() {
+        let mut h = grid_harness();
+        let fit = h.app.cam;
+        h.app.s.select_only(100);
+        h.press(egui::Key::S);
+        assert!((h.app.cam.center - h.app.s.pos[100]).length() < 0.5);
+        h.press(egui::Key::F);
+        assert!((h.app.cam.zoom / fit.zoom - 1.0).abs() < 0.02, "F fits again: {} vs {}", h.app.cam.zoom, fit.zoom);
+        h.app.s.select_only(100);
+        h.press(egui::Key::S);
+        h.press(egui::Key::Home);
+        assert!((h.app.cam.zoom / fit.zoom - 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn zoom_to_region_with_the_r_key_and_a_dragged_rectangle() {
+        let mut h = grid_harness();
+        h.app.s.select_only(3);
+        h.frames(2);
+        let before = h.app.cam;
+        h.frame(vec![key_ev(egui::Key::R, true)]);
+        h.frame(vec![key_ev(egui::Key::R, false)]);
+        assert!(h.app.view.region_on);
+        let r = h.app.canvas_rect;
+        let a = r.min + Vec2::new(r.width() * 0.3, r.height() * 0.2);
+        let b = r.min + Vec2::new(r.width() * 0.5, r.height() * 0.4);
+        let world_a = before.to_world(a - r.min, r.size());
+        let world_b = before.to_world(b - r.min, r.size());
+        h.drag(a, b);
+        h.frames(40);
+        assert!(!h.app.view.region_on, "the tool switches itself off after one use");
+        assert_eq!(h.app.s.sel_count, 1, "drawing the rectangle selected nothing");
+        assert!(h.app.cam.zoom > before.zoom * 3.0, "{} -> {}", before.zoom, h.app.cam.zoom);
+        let (sa, sb) = (h.app.cam.to_screen(world_a, r.size()), h.app.cam.to_screen(world_b, r.size()));
+        assert!(sa.x.abs() < 3.0 && sa.y.abs() < 3.0 && (sb.x - r.width()).abs() < 3.0 && (sb.y - r.height()).abs() < 3.0, "{sa:?} {sb:?}");
+    }
+
+    #[test]
+    fn region_tool_can_be_cancelled_and_escape_keeps_the_selection() {
+        let mut h = grid_harness();
+        h.app.s.select_only(3);
+        h.click_tool(Tool::Region);
+        assert!(h.app.view.region_on);
+        let before = h.app.cam;
+        h.frame(vec![key_ev(egui::Key::Escape, true)]);
+        h.frame(vec![key_ev(egui::Key::Escape, false)]);
+        assert!(!h.app.view.region_on);
+        assert_eq!(h.app.s.sel_count, 1, "Esc cancelled the tool first");
+        assert_eq!(h.app.cam.zoom, before.zoom);
+        // a tiny drag is not a region
+        h.click_tool(Tool::Region);
+        let c = h.app.canvas_rect.center();
+        h.drag(c, c + Vec2::new(2.0, 1.0));
+        h.frames(30);
+        assert!((h.app.cam.zoom / before.zoom - 1.0).abs() < 1e-3);
+        // the button toggles the tool off again
+        h.click_tool(Tool::Region);
+        assert!(!h.app.view.region_on);
+    }
+
+    #[test]
+    fn previous_and_next_view() {
+        let mut h = grid_harness();
+        let start = h.app.cam;
+        h.app.s.select_only(500);
+        h.click_tool(Tool::Selection);
+        let zoomed = h.app.cam;
+        assert!(zoomed.zoom > start.zoom);
+        assert!(h.tool(Tool::Back).unwrap().1, "there is a view to go back to");
+        h.click_tool(Tool::Back);
+        assert!((h.app.cam.zoom / start.zoom - 1.0).abs() < 0.02, "back at the start: {} vs {}", h.app.cam.zoom, start.zoom);
+        assert!(h.tool(Tool::Forward).unwrap().1);
+        h.click_tool(Tool::Forward);
+        assert!((h.app.cam.zoom / zoomed.zoom - 1.0).abs() < 0.02 && (h.app.cam.center - zoomed.center).length() < 1.0);
+        // loading another graph forgets the history
+        h.app.rebuild();
+        h.frames(5);
+        assert!(!h.app.view.hist.can_back());
+    }
+
+    #[test]
+    fn zoom_buttons_step_around_the_middle_and_animation_can_be_switched_off() {
+        let mut h = grid_harness();
+        let z0 = h.app.cam.zoom;
+        h.click_tool(Tool::ZoomIn);
+        assert!((h.app.cam.zoom / z0 - crate::view::ZOOM_STEP).abs() < 0.01, "{}", h.app.cam.zoom / z0);
+        h.click_tool(Tool::ZoomOut);
+        assert!((h.app.cam.zoom / z0 - 1.0).abs() < 0.01);
+        h.app.settings.animate_view = false;
+        let (r, _) = h.tool(Tool::ZoomIn).unwrap();
+        h.click(r.center(), Modifiers::NONE);
+        assert!(h.app.view.anim.is_none() && h.app.cam.zoom > z0 * 1.4, "without animation the view jumps at once");
+    }
+
+    #[test]
+    fn scrolling_stops_a_running_camera_move() {
+        let mut h = grid_harness();
+        h.app.s.select_only(700);
+        let (r, _) = (h.app.canvas_rect, 0);
+        h.app.run_tool(Tool::Selection);
+        h.frames(3);
+        assert!(h.app.view.anim.is_some(), "gliding");
+        h.frame(vec![Event::PointerMoved(r.center() + Vec2::new(0.0, -100.0))]);
+        h.frame(vec![Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: Vec2::new(0.0, 40.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: Modifiers::NONE }]);
+        assert!(h.app.view.anim.is_none(), "the user takes over");
+    }
+
+    #[test]
+    fn space_drag_pans_and_a_plain_space_still_pauses_the_layout() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(10);
+        assert!(h.app.s.sim.running);
+        let c0 = h.app.cam.center;
+        let r = h.app.canvas_rect;
+        let a = r.min + Vec2::new(6.0, 6.0);
+        h.frame(vec![key_ev(egui::Key::Space, true)]);
+        h.drag(a, a + Vec2::new(120.0, 60.0));
+        h.frame(vec![key_ev(egui::Key::Space, false)]);
+        h.frames(2);
+        assert!((h.app.cam.center - c0).length() > 5.0, "the view moved");
+        assert!(h.app.s.sim.running && !h.app.sim_paused, "Space + drag does not also pause");
+        h.frame(vec![key_ev(egui::Key::Space, true)]);
+        h.frame(vec![key_ev(egui::Key::Space, false)]);
+        h.frames(2);
+        assert!(h.app.sim_paused && !h.app.s.sim.running, "a plain Space press pauses");
+    }
+
+    #[test]
+    fn three_d_toolbar_presets_projection_and_drag_modes() {
+        let mut h = harness_3d();
+        for t in [Tool::Perspective, Tool::Nav(NavMode::Orbit), Tool::Nav(NavMode::Pan), Tool::Nav(NavMode::Zoom), Tool::Preset(crate::coords::View3::Top), Tool::Preset(crate::coords::View3::Iso)] {
+            assert!(h.tool(t).is_some(), "{t:?} missing in 3D");
+        }
+        // the 3D row sits above the main row
+        let top = h.tool(Tool::Preset(crate::coords::View3::Top)).unwrap().0;
+        let fit = h.tool(Tool::Fit).unwrap().0;
+        assert!(top.bottom() < fit.top());
+        h.click_tool(Tool::Preset(crate::coords::View3::Top));
+        assert!(h.app.s.cam3.pitch > 1.4, "looking down");
+        assert!(!h.app.s.cam3.ortho);
+        h.click_tool(Tool::Perspective);
+        assert!(h.app.s.cam3.ortho, "orthographic now");
+        h.frames(3);
+        assert!(h.app.draw.nodes.len() > 10, "still draws in orthographic view");
+        // pan mode: a plain drag moves the target, not the angle
+        h.click_tool(Tool::Nav(NavMode::Pan));
+        assert_eq!(h.app.view.nav, NavMode::Pan);
+        let (t0, yaw0) = (h.app.s.cam3.target, h.app.s.cam3.yaw);
+        let r = h.app.canvas_rect;
+        let a = r.min + Vec2::new(10.0, 10.0);
+        h.drag(a, a + Vec2::new(80.0, 40.0));
+        let moved = (0..3).map(|k| (h.app.s.cam3.target[k] - t0[k]).abs()).sum::<f32>();
+        assert!(moved > 1.0 && h.app.s.cam3.yaw == yaw0, "moved {moved}");
+        // orbit mode turns it
+        h.click_tool(Tool::Nav(NavMode::Orbit));
+        h.drag(a, a + Vec2::new(80.0, 0.0));
+        assert!((h.app.s.cam3.yaw - yaw0).abs() > 0.1);
+        // zoom to selection in 3D
+        h.app.s.select_only(30);
+        h.frames(2);
+        h.click_tool(Tool::Selection);
+        assert_eq!(h.app.s.cam3.target, h.app.s.pos3[30]);
+        // the view switches back to 2D: the 3D tools go away
+        h.app.s.coords.three_d = false;
+        h.app.s.apply_coords();
+        h.frames(5);
+        assert!(h.tool(Tool::Perspective).is_none());
+    }
+
+    #[test]
+    fn query_panel_shows_and_the_result_follows_the_data() {
+        use crate::query::{Cond, Op};
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(5);
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Query);
+        h.app.dock = Some(dock);
+        h.frames(3);
+        assert!(h.app.s.query_info.is_none(), "nothing asked yet");
+        let group = h.app.s.g.node_col("group").unwrap().label_at(0).unwrap();
+        h.app.s.query.a = Cond { col: Some("group".into()), op: Op::Is, value: group };
+        h.app.s.query.b = Cond { col: None, op: Op::Is, value: String::new() };
+        h.app.refilter();
+        h.frames(3);
+        let info = h.app.s.query_info.as_ref().expect("the query was answered");
+        assert!(info.n_a > 0 && info.n_b == 1200 && info.n_a_conn > 0, "{info:?}");
+        h.app.s.query.mode = crate::query::QueryMode::CrossTab;
+        h.app.s.query.rows = Some("group".into());
+        h.app.s.query.cols = Some("group".into());
+        h.app.refilter();
+        h.frames(3);
+        assert!(h.app.s.xtab.is_some() && h.app.s.query_error.is_none());
     }
 
     #[test]

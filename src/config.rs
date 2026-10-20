@@ -27,11 +27,19 @@ pub fn config_dir() -> Option<PathBuf> {
     }
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Most recent first.
     pub recent: Vec<String>,
+    /// Camera moves (zoom to selection, fit, presets …) glide instead of jumping.
+    pub animate_view: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { recent: vec![], animate_view: true }
+    }
 }
 
 impl Settings {

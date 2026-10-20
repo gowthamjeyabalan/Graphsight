@@ -4,6 +4,7 @@ use crate::app::*;
 use crate::layout::LayoutKind;
 use crate::model::*;
 use crate::render::arrow_points;
+use crate::view::{NavMode, Tool};
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, TextureId, Ui, Vec2};
 
@@ -216,6 +217,7 @@ impl App {
         let t_sim = std::time::Instant::now();
         self.run_simulation(ui);
         self.prof.add(0, t_sim);
+        self.tick_view(ui);
         let t_in = std::time::Instant::now();
         self.handle_input(ui, &resp, rect);
         self.prof.add(1, t_in);
@@ -256,7 +258,11 @@ impl App {
         self.paint_graph(&painter, rect);
         self.paint_labels(&painter, rect);
         self.paint_overlays(&painter, rect);
+        self.paint_region(&painter, rect);
         self.prof.add(3, t_p);
+        if let Some(tool) = self.toolbar(ui, rect) {
+            self.run_tool(tool);
+        }
 
         // tooltip
         if let (Some(h), None, None) = (self.hover, self.drag_node, self.box_start) {
@@ -283,17 +289,44 @@ impl App {
     fn empty_state(&mut self, ui: &mut Ui, rect: Rect, painter: &Painter) {
         let c = self.s.look.text_color();
         let tc = Color32::from_rgb(c[0], c[1], c[2]);
-        painter.text(rect.center() - Vec2::new(0.0, 40.0), Align2::CENTER_CENTER, "Grapht", FontId::proportional(34.0), tc);
+        let top = rect.center().y - 150.0;
+        painter.text(Pos2::new(rect.center().x, top), Align2::CENTER_CENTER, "Grapht", FontId::proportional(34.0), tc);
         painter.text(
-            rect.center() + Vec2::new(0.0, 0.0),
+            Pos2::new(rect.center().x, top + 42.0),
             Align2::CENTER_CENTER,
-            "Drop an edges CSV (source, target, …) and optionally a nodes CSV (id, attributes…) here,\nor open a JSON graph.",
+            "Open your files, or drop an edges CSV (source, target, …),\nan optional nodes CSV (id, attributes…) or a JSON graph here.",
             FontId::proportional(15.0),
             tc.gamma_multiply(0.7),
         );
-        let btn = Rect::from_center_size(rect.center() + Vec2::new(0.0, 60.0), Vec2::new(190.0, 30.0));
-        if ui.put(btn, egui::Button::new("Load sample dataset")).clicked() {
-            self.load_sample();
+        // the three ways in
+        let (w, h, gap) = (170.0, 34.0, 10.0);
+        let y = top + 100.0;
+        let x0 = rect.center().x - (3.0 * w + 2.0 * gap) * 0.5;
+        let place = |k: f32| Rect::from_min_size(Pos2::new(x0 + k * (w + gap), y), Vec2::new(w, h));
+        if ui.put(place(0.0), egui::Button::new("Open edges file…")).clicked() {
+            self.pick_and_load(Some(PendKindHint::Edges));
+        }
+        if ui.put(place(1.0), egui::Button::new("Open nodes file…")).clicked() {
+            self.pick_and_load(Some(PendKindHint::Nodes));
+        }
+        if ui.put(place(2.0), egui::Button::new("Open session…")).clicked() {
+            self.open_project_dialog();
+        }
+        // recent sessions
+        let recent: Vec<String> = self.settings.recent.iter().take(6).cloned().collect();
+        if !recent.is_empty() {
+            let mut y = y + h + 34.0;
+            painter.text(Pos2::new(rect.center().x, y), Align2::CENTER_CENTER, "Recent sessions", FontId::proportional(13.0), tc.gamma_multiply(0.6));
+            y += 16.0;
+            for r in recent {
+                let path = std::path::PathBuf::from(&r);
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| r.clone());
+                let row = Rect::from_min_size(Pos2::new(rect.center().x - 170.0, y), Vec2::new(340.0, 26.0));
+                if ui.put(row, egui::Button::new(name).frame(false)).on_hover_text(&r).clicked() {
+                    self.open_project(&path);
+                }
+                y += 28.0;
+            }
         }
     }
 
@@ -307,8 +340,12 @@ impl App {
             let scroll = ui.input(|i| i.smooth_scroll_delta().y);
             let pinch = ui.input(|i| i.zoom_delta());
             let factor = pinch * (scroll * 0.0016).exp();
+            if (factor - 1.0).abs() > 1e-4 {
+                self.view.anim = None;
+            }
             if (factor - 1.0).abs() > 1e-4 && self.s.is_3d() {
-                self.s.cam3.dist /= factor;
+                let c = ptr.map_or(Vec2::ZERO, |p| Vec2::new(p.x, p.y) - size * 0.5);
+                self.s.cam3.zoom_at(factor, c, size);
                 self.s.cam3.clamp();
             } else if (factor - 1.0).abs() > 1e-4 {
                 if let Some(p) = ptr {
@@ -320,6 +357,17 @@ impl App {
                     self.auto_fit = false;
                 }
             }
+        }
+
+        if resp.dragged() {
+            self.view.anim = None;
+        }
+        // zoom-to-region tool: the drag draws a rectangle instead of moving the view
+        if self.view.region_on {
+            self.region_input(ui, resp, rect);
+            self.pan_input(resp, size);
+            self.view_keys(ui);
+            return;
         }
 
         // hover
@@ -337,7 +385,11 @@ impl App {
         // the button went down rather than where the pointer is now
         if resp.drag_started_by(egui::PointerButton::Primary) {
             let origin = ui.input(|i| i.pointer.press_origin());
-            if mods.shift {
+            let space = ui.input(|i| i.key_down(egui::Key::Space));
+            self.view.pan_drag = space;
+            if space {
+                self.view.space_used = true;
+            } else if mods.shift {
                 self.box_start = origin.or_else(|| resp.interact_pointer_pos());
             } else {
                 let grabbed = origin.and_then(|o| pick_node(&self.s, &self.cam, size, o - rect.min));
@@ -376,6 +428,14 @@ impl App {
                 }
                 self.auto_fit = false;
                 ui.ctx().request_repaint();
+            } else if self.box_start.is_none() && (self.view.pan_drag || (self.s.is_3d() && self.view.nav == NavMode::Pan)) {
+                self.pan_by(resp.drag_delta(), size);
+                ui.ctx().request_repaint();
+            } else if self.box_start.is_none() && self.s.is_3d() && self.view.nav == NavMode::Zoom {
+                let at = ui.input(|i| i.pointer.press_origin()).map_or(Vec2::ZERO, |o| o - rect.min - size * 0.5);
+                self.s.cam3.zoom_at((-resp.drag_delta().y * 0.01).exp(), at, size);
+                self.s.cam3.clamp();
+                ui.ctx().request_repaint();
             } else if self.box_start.is_none() && self.s.is_3d() {
                 let d = resp.drag_delta();
                 self.s.cam3.yaw -= d.x * 0.008;
@@ -389,22 +449,10 @@ impl App {
                 ui.ctx().request_repaint();
             }
         }
-        if resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Secondary) {
-            if self.s.is_3d() {
-                // pan: slide the target across the view plane
-                let o = self.s.cam3.orbit(size);
-                let ppu = o.focal / self.s.cam3.dist;
-                let d = resp.drag_delta() / ppu;
-                for k in 0..3 {
-                    self.s.cam3.target[k] += -o.right[k] * d.x + o.up[k] * d.y;
-                }
-            } else {
-                self.cam.center -= resp.drag_delta() / self.cam.zoom;
-                self.auto_fit = false;
-            }
-        }
+        self.pan_input(resp, size);
         // drag end
         if resp.drag_stopped() {
+            self.view.pan_drag = false;
             if let Some(start) = self.box_start.take() {
                 if let Some(end) = resp.interact_pointer_pos() {
                     let r = Rect::from_two_pos(start, end);
@@ -457,18 +505,18 @@ impl App {
 
         // keyboard
         if !ui.ctx().egui_wants_keyboard_input() {
-            let (f, esc, del, all, space) = ui.input(|i| {
+            self.view_keys(ui);
+            let (esc, del, all, space) = ui.input(|i| {
                 (
-                    i.key_pressed(egui::Key::F),
                     i.key_pressed(egui::Key::Escape),
                     i.key_pressed(egui::Key::Delete),
                     i.key_pressed(egui::Key::A) && (i.modifiers.ctrl || i.modifiers.command),
-                    i.key_pressed(egui::Key::Space),
+                    i.key_released(egui::Key::Space),
                 )
             });
-            if f {
-                self.auto_fit = true;
-            }
+            // Space + drag pans, so the layout is paused or resumed when Space is let go without a drag
+            let space_pan = space && std::mem::take(&mut self.view.space_used);
+            let space = space && !space_pan;
             if esc {
                 self.s.clear_selection();
             }
@@ -492,6 +540,91 @@ impl App {
                     self.sim_paused = false;
                 }
             }
+        }
+    }
+
+    /// Slide the view by a screen-space drag.
+    fn pan_by(&mut self, delta: Vec2, size: Vec2) {
+        if self.s.is_3d() {
+            let o = self.s.cam3.orbit(size);
+            let d = delta / (o.focal / self.s.cam3.dist);
+            for k in 0..3 {
+                self.s.cam3.target[k] += -o.right[k] * d.x + o.up[k] * d.y;
+            }
+        } else {
+            self.cam.center -= delta / self.cam.zoom;
+            self.auto_fit = false;
+        }
+    }
+
+    /// Middle- or right-drag pans.
+    fn pan_input(&mut self, resp: &egui::Response, size: Vec2) {
+        if resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Secondary) {
+            self.pan_by(resp.drag_delta(), size);
+        }
+    }
+
+    /// Keyboard shortcuts of the view tools. Plain keys only: Ctrl+S and friends belong to the menus.
+    fn view_keys(&mut self, ui: &Ui) {
+        if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        use egui::Key;
+        let (f, s, r, home, back, fwd, esc, plain) = ui.input(|i| {
+            let plain = !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt && !i.modifiers.shift;
+            (
+                i.key_pressed(Key::F) && plain,
+                i.key_pressed(Key::S) && plain,
+                i.key_pressed(Key::R) && plain,
+                i.key_pressed(Key::Home) && plain,
+                i.key_pressed(Key::ArrowLeft) && i.modifiers.alt,
+                i.key_pressed(Key::ArrowRight) && i.modifiers.alt,
+                i.key_pressed(Key::Escape),
+                plain,
+            )
+        });
+        let _ = plain;
+        if esc && self.view.cancel_region() {
+            return;
+        }
+        for (hit, tool) in [(f, Tool::Fit), (s, Tool::Selection), (r, Tool::Region), (home, Tool::Home), (back, Tool::Back), (fwd, Tool::Forward)] {
+            if hit {
+                self.run_tool(tool);
+            }
+        }
+    }
+
+    /// While the region tool is on: a left-drag draws the rectangle, letting go zooms to it.
+    fn region_input(&mut self, ui: &Ui, resp: &egui::Response, rect: Rect) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        self.hover = None;
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            self.view.region_start = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos());
+        }
+        if resp.dragged_by(egui::PointerButton::Primary) {
+            ui.ctx().request_repaint();
+        }
+        if resp.drag_stopped() {
+            if let (Some(a), Some(b)) = (self.view.region_start.take(), resp.interact_pointer_pos()) {
+                let r = Rect::from_two_pos(a, b).intersect(rect).translate(-rect.min.to_vec2());
+                self.zoom_to_rect(r);
+            }
+        }
+    }
+
+    /// The rectangle being dragged for zoom-to-region.
+    fn paint_region(&self, painter: &Painter, rect: Rect) {
+        if !self.view.region_on {
+            return;
+        }
+        let tc = self.s.look.text_color();
+        let c = Color32::from_rgb(tc[0], tc[1], tc[2]);
+        if let (Some(a), Some(b)) = (self.view.region_start, painter.ctx().input(|i| i.pointer.latest_pos())) {
+            let r = Rect::from_two_pos(a, b).intersect(rect);
+            painter.rect_filled(r, 0.0, c.gamma_multiply(0.08));
+            painter.add(egui::Shape::dashed_line(&[r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()], egui::Stroke::new(1.5, c), 5.0, 4.0));
+        } else {
+            painter.text(rect.center_top() + Vec2::new(0.0, 14.0), Align2::CENTER_TOP, "Drag a rectangle to zoom to it  (Esc cancels)", FontId::proportional(13.0), c.gamma_multiply(0.85));
         }
     }
 

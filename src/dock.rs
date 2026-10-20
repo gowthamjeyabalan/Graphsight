@@ -16,14 +16,15 @@ pub enum Tab {
     Analysis,
     #[serde(alias = "Changes")]
     Subgraph,
+    Query,
     Table,
     Inspector,
     Legend,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 10] =
-        [Tab::Canvas, Tab::Data, Tab::Layout, Tab::Appearance, Tab::Filter, Tab::Analysis, Tab::Subgraph, Tab::Table, Tab::Inspector, Tab::Legend];
+    pub const ALL: [Tab; 11] =
+        [Tab::Canvas, Tab::Data, Tab::Layout, Tab::Appearance, Tab::Filter, Tab::Analysis, Tab::Subgraph, Tab::Query, Tab::Table, Tab::Inspector, Tab::Legend];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -34,6 +35,7 @@ impl Tab {
             Tab::Filter => "Filter",
             Tab::Analysis => "Analysis",
             Tab::Subgraph => "Subgraph",
+            Tab::Query => "Query",
             Tab::Table => "Nodes",
             Tab::Inspector => "Inspector",
             Tab::Legend => "Legend",
@@ -47,7 +49,7 @@ pub fn default_dock() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Canvas]);
     let tree = dock.main_surface_mut();
     let [center, left] = tree.split_left(NodeIndex::root(), 0.22, vec![Tab::Data, Tab::Layout, Tab::Appearance, Tab::Subgraph]);
-    tree.split_below(left, 0.6, vec![Tab::Filter, Tab::Analysis]);
+    tree.split_below(left, 0.6, vec![Tab::Filter, Tab::Analysis, Tab::Query]);
     let [center, _table] = tree.split_below(center, 0.74, vec![Tab::Table]);
     let [_, right] = tree.split_right(center, 0.79, vec![Tab::Inspector]);
     tree.split_below(right, 0.62, vec![Tab::Legend]);

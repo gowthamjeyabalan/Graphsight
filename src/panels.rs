@@ -160,6 +160,7 @@ impl App {
             Tab::Filter => self.section_filter(ui, &cols),
             Tab::Analysis => self.section_analysis(ui),
             Tab::Subgraph => self.section_subgraph(ui, &cols),
+            Tab::Query => self.section_query(ui, &cols),
             Tab::Inspector => self.inspector(ui),
             Tab::Legend => self.legend(ui),
             Tab::Canvas | Tab::Table => {}
@@ -651,13 +652,7 @@ impl App {
 
     pub fn select_and_focus(&mut self, i: usize) {
         self.s.select_only(i);
-        self.auto_fit = false;
-        if self.s.is_3d() {
-            self.s.cam3.target = self.s.pos3[i];
-            return;
-        }
-        self.cam.center = self.s.pos[i];
-        self.cam.zoom = self.cam.zoom.max(0.8);
+        self.run_tool(crate::view::Tool::Selection);
     }
 
     // ───────────────────────── inspector ─────────────────────────
@@ -1177,14 +1172,13 @@ impl App {
             }
             if self.s.is_3d() {
                 ui.horizontal_wrapped(|ui| {
-                    for (label, v) in [("Top", View3::Top), ("Front", View3::Front), ("Side", View3::Side), ("Perspective", View3::Iso)] {
+                    for (label, v) in [("Top", View3::Top), ("Front", View3::Front), ("Side", View3::Side), ("Iso", View3::Iso)] {
                         if ui.small_button(label).clicked() {
-                            self.s.cam3.preset(v);
-                            self.auto_fit = true;
+                            self.run_tool(crate::view::Tool::Preset(v));
                         }
                     }
                 });
-                ui.weak("Drag to orbit, right-drag to pan, scroll to zoom, double-click empty space or press F to fit.");
+                ui.weak("Drag to orbit, middle- or right-drag (or Space + drag) to pan, scroll to zoom, double-click empty space or press F to fit. The buttons at the bottom of the graph zoom to the selection or a region.");
                 self.boxes_section(ui, cols);
             }
             if self.s.coords.x.is_none() || self.s.coords.y.is_none() {
@@ -1204,4 +1198,225 @@ impl App {
         }
         self.s.coords_active()
     }
+}
+
+// ───────────────────────── connection query ─────────────────────────
+
+impl App {
+    fn section_query(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
+        use crate::query::{Dir, QueryMode};
+        if self.s.g.n() == 0 {
+            ui.weak("Load a graph first.");
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        crate::theme::heading(ui, "Connection query");
+        ui.weak("How many nodes with one attribute connect to nodes with another? Build the two conditions; click a result to select those nodes on the canvas.");
+        ui.add_space(4.0);
+        let mut dirty = ui.segmented(&mut self.s.query.mode, &[(QueryMode::Count, "Count"), (QueryMode::CrossTab, "Cross-tab")]);
+        ui.add_space(4.0);
+
+        match self.s.query.mode {
+            QueryMode::Count => {
+                ui.label("Nodes where");
+                dirty |= cond_editor(ui, "qa", &mut self.s.query.a, &self.s.g, cols, "(any node)");
+                ui.add_space(2.0);
+                ui.label("connect to nodes where");
+                dirty |= cond_editor(ui, "qb", &mut self.s.query.b, &self.s.g, cols, "(any other node)");
+                ui.add_space(2.0);
+                ui.label("Direction");
+                dirty |= ui.segmented(&mut self.s.query.dir, &[(Dir::Either, "Either way"), (Dir::Out, "First → second"), (Dir::In, "Second → first")]);
+            }
+            QueryMode::CrossTab => {
+                row(ui, "Rows", |ui| dirty |= combo_col(ui, "xt_rows", &mut self.s.query.rows, cols, false, "(choose an attribute)"));
+                row(ui, "Columns", |ui| dirty |= combo_col(ui, "xt_cols", &mut self.s.query.cols, cols, false, "(choose an attribute)"));
+                ui.label("Direction");
+                dirty |= ui.segmented(&mut self.s.query.dir, &[(Dir::Either, "Either way"), (Dir::Out, "Row → column"), (Dir::In, "Column → row")]);
+            }
+        }
+        if self.s.g.directed {
+            ui.weak("A directed connection is outgoing for its source and incoming for its target; an undirected one counts both ways.");
+        }
+        dirty |= ui.switch(&mut self.s.query.visible_only, "Only visible nodes").on_hover_text("Leave out nodes hidden by the filter, a subgraph or Hide.").changed();
+        if dirty {
+            self.s.recompute_query();
+        }
+        ui.add_space(6.0);
+
+        if let Some(e) = self.s.query_error.clone() {
+            ui.colored_label(egui::Color32::from_rgb(235, 100, 90), e);
+            return;
+        }
+        if !self.s.query.is_set() {
+            ui.weak(match self.s.query.mode {
+                QueryMode::Count => "Choose an attribute for at least one of the conditions.",
+                QueryMode::CrossTab => "Choose the two attributes to compare.",
+            });
+            return;
+        }
+        let mut select: Option<(Vec<usize>, String)> = None;
+        if let Some(info) = self.s.query_info.clone() {
+            let (first, second) = crate::query::sentences(&self.s.g, &self.s.query, &info);
+            theme::inner_card().show(ui, |ui| {
+                let result_link = |ui: &mut Ui, text: String, n: usize| -> bool {
+                    let r = ui
+                        .add(egui::Label::new(RichText::new(text).color(ui.visuals().hyperlink_color)).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("Click to select these {n} nodes"));
+                    r.clicked() && n > 0
+                };
+                if result_link(ui, first, info.n_a_conn) {
+                    select = Some((info.connected(), "connected nodes".into()));
+                }
+                if let Some(second) = second {
+                    if result_link(ui, second, info.n_a_none()) {
+                        select = Some((info.unconnected(), "nodes without a connection".into()));
+                    }
+                }
+            });
+            if info.n_a > 0 && info.n_b > 0 {
+                ui.add_space(4.0);
+                let pct = 100.0 * info.n_a_conn as f64 / info.n_a as f64;
+                egui::Grid::new("query_counts").num_columns(2).show(ui, |ui| {
+                    for (k, v) in [
+                        ("First group", info.n_a.to_string()),
+                        ("  with a connection", format!("{} ({pct:.0}%)", info.n_a_conn)),
+                        ("  without", info.n_a_none().to_string()),
+                        ("Second group", info.n_b.to_string()),
+                        ("  reached", info.n_b_reached.to_string()),
+                        ("Connections between", info.n_edges.to_string()),
+                    ] {
+                        ui.label(k);
+                        ui.label(RichText::new(v).monospace());
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add_enabled(info.n_a_conn > 0, egui::Button::new("Select connected")).clicked() {
+                        select = Some((info.connected(), "connected nodes".into()));
+                    }
+                    if ui.add_enabled(info.n_a_none() > 0, egui::Button::new("Select without")).clicked() {
+                        select = Some((info.unconnected(), "nodes without a connection".into()));
+                    }
+                    if ui.add_enabled(info.n_b_reached > 0, egui::Button::new("Select reached")).on_hover_text("The nodes of the second group that are connected to the first").clicked() {
+                        select = Some((info.reached(), "nodes reached".into()));
+                    }
+                });
+            }
+        } else if let Some(x) = self.s.xtab.clone() {
+            ui.label(RichText::new(format!("{} connections counted", x.n_edges)).strong());
+            ui.weak("Each cell is the number of connections between a row value and a column value. Click a cell to select the nodes at both ends.");
+            let max = x.max_count().max(1) as f32;
+            let base = ui.visuals().selection.bg_fill;
+            let mut clicked: Option<(usize, usize)> = None;
+            egui::ScrollArea::both().id_salt("xtab_scroll").max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                egui::Grid::new("xtab_grid").spacing([4.0, 4.0]).show(ui, |ui| {
+                    ui.label(theme::secondary(format!("{} ↓  {} →", x.rows_name, x.cols_name)));
+                    for c in &x.cols {
+                        ui.label(RichText::new(short(c, 12)).strong()).on_hover_text(c);
+                    }
+                    ui.end_row();
+                    for (r, rl) in x.rows.iter().enumerate() {
+                        ui.label(RichText::new(short(rl, 16)).strong()).on_hover_text(rl);
+                        for c in 0..x.cols.len() {
+                            let n = x.count(r, c);
+                            if n == 0 {
+                                ui.weak("·");
+                                continue;
+                            }
+                            let k = n as f32 / max;
+                            let fill = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), (40.0 + 190.0 * k) as u8);
+                            let b = ui.add(egui::Button::new(RichText::new(n.to_string()).monospace()).fill(fill).min_size(egui::vec2(40.0, 22.0)));
+                            if b.on_hover_text(format!("{} = {}  ×  {} = {}: {n} connections", x.rows_name, rl, x.cols_name, x.cols[c])).clicked() {
+                                clicked = Some((r, c));
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+            if let Some((r, c)) = clicked {
+                select = Some((x.cell_nodes(&self.s.g, r, c), format!("nodes in {} × {}", x.rows[r], x.cols[c])));
+            }
+        }
+        if let Some((nodes, what)) = select {
+            let n = nodes.len();
+            self.s.select_nodes(nodes);
+            self.toast(&ctx, format!("Selected {n} {what}"));
+        }
+    }
+}
+
+/// One condition of the query: attribute, operator and value.
+fn cond_editor(ui: &mut Ui, id: &str, cond: &mut crate::query::Cond, g: &crate::graph::Graph, cols: &[ColInfo], any_label: &str) -> bool {
+    use crate::query::{ID_COLUMN, Op};
+    let mut changed = false;
+    // attribute (the node id is offered as a pseudo-attribute)
+    ui.horizontal(|ui| {
+        ui.spacing_mut().combo_width = (ui.available_width() - 12.0).max(90.0);
+        let shown = match cond.col.as_deref() {
+            None => any_label.to_string(),
+            Some(c) if c == ID_COLUMN && g.node_col(c).is_none() => "(node id)".into(),
+            Some(c) => c.to_string(),
+        };
+        ComboBox::from_id_salt((id, "col")).selected_text(shown).width(ui.spacing().combo_width).show_ui(ui, |ui| {
+            if ui.selectable_label(cond.col.is_none(), any_label).clicked() {
+                cond.col = None;
+                changed = true;
+            }
+            if g.node_col(ID_COLUMN).is_none() && ui.selectable_label(cond.col.as_deref() == Some(ID_COLUMN), "(node id)").clicked() {
+                cond.col = Some(ID_COLUMN.into());
+                cond.value.clear();
+                changed = true;
+            }
+            for c in cols {
+                let label = if c.metric { format!("{}  (computed)", c.name) } else { c.name.clone() };
+                if ui.selectable_label(cond.col.as_deref() == Some(c.name.as_str()), label).clicked() {
+                    cond.col = Some(c.name.clone());
+                    cond.value.clear();
+                    changed = true;
+                }
+            }
+        });
+    });
+    let Some(col_name) = cond.col.clone() else { return changed };
+    ui.horizontal(|ui| {
+        ComboBox::from_id_salt((id, "op")).selected_text(cond.op.label()).width(96.0).show_ui(ui, |ui| {
+            for op in Op::ALL {
+                changed |= ui.selectable_value(&mut cond.op, op, op.label()).changed();
+            }
+        });
+        if !cond.op.needs_value() {
+            return;
+        }
+        // a list of the existing values for text attributes with "is" / "is not"; a text box otherwise
+        let col = g.node_col(&col_name);
+        let categorical = col.is_some_and(|c| !c.is_numeric() || c.hint_cat);
+        if categorical && matches!(cond.op, Op::Is | Op::IsNot) {
+            let labels = col.map(|c| c.as_categories().1).unwrap_or_default();
+            if labels.len() <= 400 {
+                let text = if cond.value.is_empty() { "(choose a value)".to_string() } else { cond.value.clone() };
+                ComboBox::from_id_salt((id, "val")).selected_text(text).width((ui.available_width() - 8.0).max(80.0)).show_ui(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        for l in &labels {
+                            if ui.selectable_label(cond.value == *l, l).clicked() {
+                                cond.value = l.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+                return;
+            }
+        }
+        let hint = if col.is_some_and(|c| c.is_numeric()) { "number" } else { "text" };
+        changed |= ui.add(egui::TextEdit::singleline(&mut cond.value).id_salt((id, "txt")).hint_text(hint).desired_width(f32::INFINITY)).changed();
+    });
+    changed
+}
+
+/// A label cut to `n` characters, with an ellipsis if it was longer.
+fn short(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
 }

@@ -8,6 +8,7 @@ use crate::data::*;
 use crate::expr;
 use crate::graph::{Graph, build_graph};
 use crate::layout::*;
+use crate::query::{self, QueryInfo, QueryMode, QuerySettings, XTab};
 use crate::style::*;
 use crate::subgraph::{self, SubInfo, SubSettings};
 use anyhow::Result;
@@ -332,6 +333,11 @@ pub struct Session {
     pub change_info: Option<ChangeInfo>,
     pub sub: SubSettings,
     pub sub_info: Option<SubInfo>,
+    /// The connection query (settings, and the result of the last run; at most one of the two results is set).
+    pub query: QuerySettings,
+    pub query_info: Option<QueryInfo>,
+    pub xtab: Option<XTab>,
+    pub query_error: Option<String>,
     pub coords: CoordSettings,
     /// 3D positions (x right, y into the screen, z up); filled while node coordinates are in use.
     pub pos3: Vec<[f32; 3]>,
@@ -376,6 +382,10 @@ impl Default for Session {
             change_info: None,
             sub: SubSettings::default(),
             sub_info: None,
+            query: QuerySettings::default(),
+            query_info: None,
+            xtab: None,
+            query_error: None,
             coords: CoordSettings::default(),
             pos3: vec![],
             cam3: Cam3::default(),
@@ -511,6 +521,7 @@ impl Session {
         if self.sub.rule.as_ref().is_some_and(|r| self.g.node_col(&r.col).is_none()) {
             self.sub.rule = None;
         }
+        self.drop_missing_query_columns();
         for c in [&mut self.coords.x, &mut self.coords.y, &mut self.coords.z] {
             if c.as_ref().is_some_and(|name| self.g.node_col(name).is_none()) {
                 *c = None;
@@ -590,6 +601,59 @@ impl Session {
         self.n_vis_edges = g.edges.iter().filter(|&&(s, t)| vis[s as usize] && vis[t as usize]).count();
         self.vis = vis;
         self.recompute_changes();
+        self.recompute_query();
+    }
+
+    /// Work the connection query out again (after its settings, the filter or the data changed).
+    pub fn recompute_query(&mut self) {
+        self.query_info = None;
+        self.xtab = None;
+        self.query_error = None;
+        if !self.query.is_set() || self.g.n() == 0 {
+            return;
+        }
+        match self.query.mode {
+            QueryMode::Count => match query::run(&self.g, &self.query, &self.vis) {
+                Ok(info) => self.query_info = Some(info),
+                Err(e) => self.query_error = Some(e),
+            },
+            QueryMode::CrossTab => {
+                let (Some(r), Some(c)) = (self.query.rows.as_deref(), self.query.cols.as_deref()) else { return };
+                let vis = self.query.visible_only.then_some(self.vis.as_slice());
+                match query::crosstab(&self.g, r, c, self.query.dir, vis) {
+                    Ok(x) => self.xtab = Some(x),
+                    Err(e) => self.query_error = Some(e),
+                }
+            }
+        }
+    }
+
+    /// Forget query settings that name a column the data no longer has.
+    pub fn drop_missing_query_columns(&mut self) {
+        let g = &self.g;
+        let gone = |c: &Option<String>| c.as_deref().is_some_and(|n| n != query::ID_COLUMN && g.node_col(n).is_none());
+        for cond in [&mut self.query.a, &mut self.query.b] {
+            if gone(&cond.col) {
+                cond.col = None;
+                cond.value.clear();
+            }
+        }
+        if gone(&self.query.rows) {
+            self.query.rows = None;
+        }
+        if gone(&self.query.cols) {
+            self.query.cols = None;
+        }
+    }
+
+    /// Make exactly these nodes the selection.
+    pub fn select_nodes(&mut self, nodes: impl IntoIterator<Item = usize>) {
+        self.clear_selection();
+        for i in nodes {
+            if i < self.sel.len() {
+                self.set_selected(i, true);
+            }
+        }
     }
 
     /// Re-find the connections where the chosen attribute changes (also after any filter change,
@@ -697,6 +761,11 @@ impl Session {
     /// far from the nodes (placeholder values such as -9999, a site outline) are left out of the framing, or one
     /// of them would push the camera away until everything else shrinks to nothing.
     pub fn fit_cam3(&mut self) {
+        self.cam3 = self.cam3_fit_target();
+    }
+
+    /// The camera `fit_cam3` would set, without changing anything.
+    pub fn cam3_fit_target(&self) -> Cam3 {
         let boxes_shown = self.boxes_shown();
         let mut pts: Vec<[f32; 3]> = if boxes_shown && !self.boxes.show_nodes {
             vec![] // boxes alone: frame just those
@@ -720,7 +789,9 @@ impl Session {
             }
         }
         let pts = if pts.is_empty() { self.pos3.clone() } else { pts };
-        self.cam3.fit(&pts);
+        let mut cam = self.cam3;
+        cam.fit(&pts);
+        cam
     }
 
     /// For each box: does it lie within (a generous margin around) the cloud of all nodes?
@@ -984,6 +1055,7 @@ impl Session {
         if self.sub.rule.as_ref().is_some_and(|r| g.node_col(&r.col).is_none()) {
             self.sub.rule = None;
         }
+        self.drop_missing_query_columns();
     }
 
     pub fn is_animating(&self) -> bool {
