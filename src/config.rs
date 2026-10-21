@@ -1,6 +1,7 @@
 //! Per-user settings: where they live, the recent-sessions list and the saved panel layout.
 
 use crate::dock::Tab;
+use crate::theme::ThemeMode;
 use egui_dock::DockState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -34,11 +35,35 @@ pub struct Settings {
     pub recent: Vec<String>,
     /// Camera moves (zoom to selection, fit, presets …) glide instead of jumping.
     pub animate_view: bool,
+    /// Dark, light, or follow the operating system.
+    pub theme: ThemeMode,
+    /// The graph background changes with the interface theme.
+    pub graph_follows_theme: bool,
+    /// Interface scale (1.0 = normal).
+    pub ui_scale: f32,
+    /// Open the panel arrangement that was open when Grapht was last closed.
+    pub restore_layout: bool,
+    /// The floating zoom / view buttons at the bottom of the graph.
+    pub show_toolbar: bool,
+    /// Details of the node under the pointer.
+    pub show_tooltips: bool,
+    /// The “ms / frame” read-out in the menu bar.
+    pub show_frame_time: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { recent: vec![], animate_view: true }
+        Settings {
+            recent: vec![],
+            animate_view: true,
+            theme: ThemeMode::Dark,
+            graph_follows_theme: true,
+            ui_scale: 1.0,
+            restore_layout: true,
+            show_toolbar: true,
+            show_tooltips: true,
+            show_frame_time: true,
+        }
     }
 }
 
@@ -104,3 +129,33 @@ pub fn save_layout_text(text: &str) {
     }
 }
 
+
+// ───────────────────────────── workspace templates ─────────────────────────────
+
+/// A named panel arrangement the user saved from the Window menu.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Workspace {
+    pub name: String,
+    /// The arrangement, in the same text form as `layout.json`.
+    pub layout: String,
+}
+
+impl Workspace {
+    pub fn dock(&self) -> Option<DockState<Tab>> {
+        layout_from_str(&self.layout)
+    }
+}
+
+pub fn load_workspaces() -> Vec<Workspace> {
+    config_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("workspaces.json")).ok())
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_workspaces(list: &[Workspace]) {
+    if let (Some(d), Ok(t)) = (config_dir(), serde_json::to_string_pretty(list)) {
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(d.join("workspaces.json"), t);
+    }
+}

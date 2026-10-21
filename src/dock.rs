@@ -17,14 +17,15 @@ pub enum Tab {
     #[serde(alias = "Changes")]
     Subgraph,
     Query,
+    Section,
     Table,
     Inspector,
     Legend,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 11] =
-        [Tab::Canvas, Tab::Data, Tab::Layout, Tab::Appearance, Tab::Filter, Tab::Analysis, Tab::Subgraph, Tab::Query, Tab::Table, Tab::Inspector, Tab::Legend];
+    pub const ALL: [Tab; 12] =
+        [Tab::Canvas, Tab::Data, Tab::Layout, Tab::Appearance, Tab::Filter, Tab::Analysis, Tab::Subgraph, Tab::Query, Tab::Section, Tab::Table, Tab::Inspector, Tab::Legend];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -36,6 +37,7 @@ impl Tab {
             Tab::Analysis => "Analysis",
             Tab::Subgraph => "Subgraph",
             Tab::Query => "Query",
+            Tab::Section => "Section",
             Tab::Table => "Nodes",
             Tab::Inspector => "Inspector",
             Tab::Legend => "Legend",
@@ -49,11 +51,56 @@ pub fn default_dock() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Canvas]);
     let tree = dock.main_surface_mut();
     let [center, left] = tree.split_left(NodeIndex::root(), 0.22, vec![Tab::Data, Tab::Layout, Tab::Appearance, Tab::Subgraph]);
-    tree.split_below(left, 0.6, vec![Tab::Filter, Tab::Analysis, Tab::Query]);
+    tree.split_below(left, 0.6, vec![Tab::Filter, Tab::Analysis, Tab::Query, Tab::Section]);
     let [center, _table] = tree.split_below(center, 0.74, vec![Tab::Table]);
     let [_, right] = tree.split_right(center, 0.79, vec![Tab::Inspector]);
     tree.split_below(right, 0.62, vec![Tab::Legend]);
     dock
+}
+
+/// The built-in workspace templates offered in the Window menu.
+pub fn builtin_workspaces() -> Vec<(&'static str, DockState<Tab>)> {
+    // everything on the left, nothing else: the graph gets all the room
+    let graph_only = DockState::new(vec![Tab::Canvas]);
+
+    // look at the data: controls left, inspector and legend right, no table
+    let explore = {
+        let mut dock = DockState::new(vec![Tab::Canvas]);
+        let tree = dock.main_surface_mut();
+        let [center, left] = tree.split_left(NodeIndex::root(), 0.22, vec![Tab::Data, Tab::Layout, Tab::Appearance, Tab::Filter]);
+        tree.split_below(left, 0.6, vec![Tab::Subgraph, Tab::Section]);
+        let [_, right] = tree.split_right(center, 0.79, vec![Tab::Inspector]);
+        tree.split_below(right, 0.62, vec![Tab::Legend]);
+        dock
+    };
+
+    // numbers first: a tall node table under a smaller graph
+    let analysis = {
+        let mut dock = DockState::new(vec![Tab::Canvas]);
+        let tree = dock.main_surface_mut();
+        let [center, left] = tree.split_left(NodeIndex::root(), 0.22, vec![Tab::Analysis, Tab::Query, Tab::Filter]);
+        tree.split_below(left, 0.55, vec![Tab::Subgraph, Tab::Data]);
+        let [center, _table] = tree.split_below(center, 0.5, vec![Tab::Table]);
+        tree.split_right(center, 0.78, vec![Tab::Inspector]);
+        dock
+    };
+
+    // for showing the graph to others: just the graph and its legend
+    let presentation = {
+        let mut dock = DockState::new(vec![Tab::Canvas]);
+        let tree = dock.main_surface_mut();
+        tree.split_right(NodeIndex::root(), 0.82, vec![Tab::Legend]);
+        dock
+    };
+
+    vec![("Default", default_dock()), ("Explore", explore), ("Analysis", analysis), ("Presentation", presentation), ("Graph only", graph_only)]
+}
+
+/// Close every panel except the graph.
+pub fn close_all_panels(dock: &mut DockState<Tab>) {
+    for t in Tab::ALL.into_iter().filter(|t| *t != Tab::Canvas) {
+        close(dock, t);
+    }
 }
 
 /// A dock must contain the canvas exactly once; anything else (a hand-edited or damaged file) falls back to the default.

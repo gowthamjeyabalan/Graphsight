@@ -834,7 +834,8 @@ impl ForceSim {
     }
 
     /// (Re)build the problem from the graph. Keeps pins if the node count is unchanged.
-    pub fn setup(&mut self, g: &Graph, active: &[u32], p: &ForceParams, anchors: Option<Vec<V2>>) {
+    /// `extra` are further links between nodes (the bridges of a contracted subgraph) that pull like edges.
+    pub fn setup(&mut self, g: &Graph, active: &[u32], p: &ForceParams, anchors: Option<Vec<V2>>, extra: &[(u32, u32)]) {
         let n = g.n();
         if self.pinned.len() != n {
             self.pinned = vec![false; n];
@@ -862,6 +863,13 @@ impl ForceSim {
                 *slot += w;
             } else {
                 *slot = 1.0;
+            }
+        }
+        for &(s, t) in extra {
+            if s != t && in_active[s as usize] && in_active[t as usize] {
+                let key = (s.min(t), s.max(t));
+                let mean = if weights.is_some() && !pairs.is_empty() { pairs.values().sum::<f32>() / pairs.len() as f32 } else { 1.0 };
+                pairs.entry(key).or_insert(mean.max(1.0));
             }
         }
         let mean_w = if pairs.is_empty() { 1.0 } else { pairs.values().sum::<f32>() / pairs.len() as f32 };
@@ -1188,7 +1196,7 @@ mod tests {
         let mut pos = initial_spiral(g.n());
         let p = ForceParams::default();
         let mut sim = ForceSim::new();
-        sim.setup(&g, &all(&g), &p, None);
+        sim.setup(&g, &all(&g), &p, None, &[]);
         sim.reheat(1.0);
         sim.step(&mut pos, &p, 400);
         assert!(!sim.running, "alpha should have cooled below the minimum");
@@ -1204,7 +1212,7 @@ mod tests {
         let mut pos = initial_spiral(g.n());
         let p = ForceParams::default();
         let mut sim = ForceSim::new();
-        sim.setup(&g, &all(&g), &p, None);
+        sim.setup(&g, &all(&g), &p, None, &[]);
         sim.pin(3, true);
         let before = pos[3];
         sim.reheat(1.0);

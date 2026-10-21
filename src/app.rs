@@ -50,6 +50,10 @@ pub struct App {
     pub hover: Option<usize>,
     pub drag_node: Option<usize>,
     pub box_start: Option<Pos2>,
+    /// The section line(s) being dragged in the flat view: `[x line, y line]`, each 0 = lower side, 1 = upper side.
+    pub section_drag: Option<[Option<usize>; 2]>,
+    /// The 3D section arrow being dragged: (axis, side).
+    pub section_drag3: Option<(usize, usize)>,
     pub pin_after_drag: bool,
     pub pending: Option<Pending>,
     pub error: Option<String>,
@@ -63,6 +67,13 @@ pub struct App {
     pub layout_check: f64,
     pub last_title: String,
     pub show_help: bool,
+    pub show_settings: bool,
+    /// The workspace templates the user saved (Window ▸ Workspaces).
+    pub workspaces: Vec<crate::config::Workspace>,
+    /// The "save workspace" dialog: the name being typed.
+    pub ws_dialog: Option<WsDialog>,
+    /// Whether the interface was dark the last time the graph background was synced with it.
+    pub applied_dark: bool,
     pub table: TableState,
     pub top_metric: Option<String>,
     pub sim_paused: bool,
@@ -84,6 +95,10 @@ fn make_disc(size: usize) -> egui::ColorImage {
     egui::ColorImage::new([size, size], px)
 }
 
+pub struct WsDialog {
+    pub name: String,
+}
+
 pub struct Args {
     pub project: Option<PathBuf>,
     pub edges: Option<PathBuf>,
@@ -94,18 +109,30 @@ pub struct Args {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
+        let has_project = args.project.is_some();
         let mut app = Self::new_with_ctx(&cc.egui_ctx, args);
         app.persist = true;
         app.settings = crate::config::Settings::load();
-        if let Some(d) = crate::config::load_layout() {
-            app.dock = Some(d);
+        app.workspaces = crate::config::load_workspaces();
+        crate::theme::set_mode(&cc.egui_ctx, app.settings.theme);
+        cc.egui_ctx.set_zoom_factor(app.settings.ui_scale.clamp(0.6, 2.0));
+        // the graph background follows the interface (a session that is opened later keeps its own choice)
+        app.applied_dark = cc.egui_ctx.theme() == egui::Theme::Dark;
+        if app.settings.graph_follows_theme && !has_project {
+            app.s.look.dark = app.applied_dark;
+            app.restyle();
+        }
+        if app.settings.restore_layout {
+            if let Some(d) = crate::config::load_layout() {
+                app.dock = Some(d);
+            }
         }
         app.layout_text = app.dock.as_ref().and_then(crate::config::layout_to_string).unwrap_or_default();
         app
     }
 
     pub fn new_with_ctx(ctx: &Context, args: Args) -> Self {
-        crate::theme::apply(ctx);
+        crate::theme::init(ctx, crate::theme::ThemeMode::Dark);
         let opts = egui::TextureOptions::LINEAR;
         let tex = Textures {
             small: ctx.load_texture("disc16", make_disc(16), opts),
@@ -128,6 +155,8 @@ impl App {
             hover: None,
             drag_node: None,
             box_start: None,
+            section_drag: None,
+            section_drag3: None,
             pin_after_drag: false,
             pending: None,
             error: None,
@@ -140,6 +169,10 @@ impl App {
             layout_check: 0.0,
             last_title: String::new(),
             show_help: false,
+            show_settings: false,
+            workspaces: vec![],
+            ws_dialog: None,
+            applied_dark: true,
             table: TableState { dirty: true, ..Default::default() },
             top_metric: Some("_pagerank".into()),
             sim_paused: false,
@@ -384,7 +417,12 @@ impl App {
         let save_as = KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S);
         let save = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
         let open = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
-        let (do_save_as, do_save, do_open) = ctx.input_mut(|i| (i.consume_shortcut(&save_as), i.consume_shortcut(&save), i.consume_shortcut(&open)));
+        let settings = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
+        let (do_save_as, do_save, do_open, do_settings) =
+            ctx.input_mut(|i| (i.consume_shortcut(&save_as), i.consume_shortcut(&save), i.consume_shortcut(&open), i.consume_shortcut(&settings)));
+        if do_settings {
+            self.show_settings = !self.show_settings;
+        }
         if do_save_as {
             self.report(ctx, |a| a.save_project_as(), "Session saved");
         } else if do_save {
@@ -485,29 +523,17 @@ impl App {
                 }
             });
             ui.menu_button("View", |ui| {
-                ui.label(crate::theme::secondary("Panels"));
-                let mut dock = self.dock.take().unwrap_or_else(crate::dock::default_dock);
-                for tab in crate::dock::Tab::ALL.into_iter().filter(|t| *t != crate::dock::Tab::Canvas) {
-                    let mut open = crate::dock::is_open(&dock, tab);
-                    if ui.checkbox(&mut open, tab.title()).changed() {
-                        if open {
-                            crate::dock::open_or_focus(&mut dock, tab);
-                        } else {
-                            crate::dock::close(&mut dock, tab);
-                        }
-                    }
-                }
-                if ui.button("Reset panel layout").clicked() {
-                    ui.close();
-                    dock = crate::dock::default_dock();
-                }
-                self.dock = Some(dock);
-                ui.separator();
                 if ui.checkbox(&mut self.s.look.dark, "Dark graph background").changed() {
                     self.restyle();
                 }
+                let mut sec = self.s.section.enabled;
+                if ui.checkbox(&mut sec, "Section box").on_hover_text("Cut the viewport with a box; set it up in the Section panel.").changed() {
+                    self.set_section(sec);
+                }
                 ui.separator();
-                ui.checkbox(&mut self.settings.animate_view, "Animate view changes");
+                if ui.checkbox(&mut self.settings.animate_view, "Animate view changes").changed() {
+                    self.save_settings();
+                }
                 if ui.button("Fit graph to window   (F)").clicked() {
                     ui.close();
                     self.run_tool(crate::view::Tool::Fit);
@@ -525,6 +551,8 @@ impl App {
                     self.run_tool(crate::view::Tool::Home);
                 }
             });
+            self.window_menu(ui);
+            self.settings_menu(ui);
             ui.menu_button("Help", |ui| {
                 if ui.button("Controls and filter syntax").clicked() {
                     ui.close();
@@ -532,12 +560,16 @@ impl App {
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(format!("{:.1} ms / frame (CPU)", self.frame_ms));
+                if self.settings.show_frame_time {
+                    ui.weak(format!("{:.1} ms / frame (CPU)", self.frame_ms));
+                }
             });
         });
     }
 
     fn dialogs(&mut self, ctx: &Context) {
+        self.settings_dialog(ctx);
+        self.workspace_dialog(ctx);
         // import / remap dialog
         let mut commit = false;
         let mut cancel = false;
@@ -662,7 +694,7 @@ impl App {
             ui.strong("View toolbar (bottom of the graph)");
             ui.label("• F fit all visible nodes · S zoom to selection · R zoom to region (drag a rectangle; Esc cancels)");
             ui.label("• Zoom in / out · Home reset view · Alt+← / Alt+→ previous / next view");
-            ui.label("• 3D: Top / Front / Side / Iso views, perspective or orthographic projection");
+            ui.label("• 3D: Top / Front / Back / Left / Right / Iso views, perspective or orthographic projection");
             ui.label("• View ▸ Animate view changes turns the camera glide on or off");
             ui.add_space(6.0);
             ui.strong("Filter expressions");
@@ -712,9 +744,10 @@ impl App {
         self.handle_drops(&ctx);
         self.handle_shortcuts(&ctx);
         self.update_window_title(&ctx);
+        self.follow_theme(&ctx);
 
-        egui::Panel::top("menu").frame(egui::Frame::new().fill(crate::theme::BG).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| self.menu_bar(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::BG)).show(ui, |ui| self.show_dock(ui));
+        egui::Panel::top("menu").frame(egui::Frame::new().fill(crate::theme::pal_ctx(&ctx).bg).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| self.menu_bar(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::pal_ctx(&ctx).bg)).show(ui, |ui| self.show_dock(ui));
 
         self.persist_layout(&ctx);
         self.dialogs(&ctx);
@@ -1262,10 +1295,22 @@ mod ui_tests {
         for t in [Tool::Perspective, Tool::Nav(NavMode::Orbit), Tool::Nav(NavMode::Pan), Tool::Nav(NavMode::Zoom), Tool::Preset(crate::coords::View3::Top), Tool::Preset(crate::coords::View3::Iso)] {
             assert!(h.tool(t).is_some(), "{t:?} missing in 3D");
         }
-        // the 3D row sits above the main row
-        let top = h.tool(Tool::Preset(crate::coords::View3::Top)).unwrap().0;
-        let fit = h.tool(Tool::Fit).unwrap().0;
-        assert!(top.bottom() < fit.top());
+        // one bar holds the 2D tools and all the viewing directions
+        use crate::coords::View3;
+        let bar = h.app.view.toolbar_rect.unwrap();
+        for v in [View3::Top, View3::Front, View3::Back, View3::Left, View3::Right, View3::Iso] {
+            let r = h.tool(Tool::Preset(v)).unwrap_or_else(|| panic!("{v:?} view missing")).0;
+            assert!(bar.contains_rect(r), "{v:?} is inside the one bar");
+        }
+        assert!(bar.contains_rect(h.tool(Tool::Fit).unwrap().0));
+        // the bar never covers the axis gizmo in the corner
+        let canvas = h.app.canvas_rect;
+        assert!(bar.right() <= canvas.right() - crate::toolbar::GIZMO_ROOM + 1.0, "bar {:?} canvas {:?}", bar, canvas);
+        // each direction looks along the right axis
+        for (v, yaw, pitch) in [(View3::Front, 0.0, 0.0), (View3::Back, std::f32::consts::PI, 0.0), (View3::Right, std::f32::consts::FRAC_PI_2, 0.0), (View3::Left, std::f32::consts::PI * 1.5, 0.0)] {
+            h.click_tool(Tool::Preset(v));
+            assert!((h.app.s.cam3.yaw - yaw).abs() < 1e-3 && (h.app.s.cam3.pitch - pitch).abs() < 1e-3, "{v:?}");
+        }
         h.click_tool(Tool::Preset(crate::coords::View3::Top));
         assert!(h.app.s.cam3.pitch > 1.4, "looking down");
         assert!(!h.app.s.cam3.ortho);
@@ -1633,6 +1678,281 @@ mod ui_tests {
             s.recompute_boxes();
             s.fit_cam3();
         }
+    }
+
+    #[test]
+    fn light_and_dark_themes_both_render_and_the_graph_background_follows() {
+        use crate::theme::{self, ThemeMode};
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(3);
+        assert!(h.app.s.look.dark);
+        theme::set_mode(&h.ctx, ThemeMode::Light);
+        h.frames(3);
+        assert_eq!(h.ctx.theme(), egui::Theme::Light);
+        assert!(!h.ctx.global_style().visuals.dark_mode);
+        assert_eq!(h.ctx.global_style().visuals.panel_fill, theme::LIGHT.bg);
+        assert!(!h.app.s.look.dark, "the graph background follows the interface");
+        // switched off: the graph keeps its own background
+        h.app.settings.graph_follows_theme = false;
+        theme::set_mode(&h.ctx, ThemeMode::Dark);
+        h.frames(3);
+        assert_eq!(h.ctx.global_style().visuals.panel_fill, theme::DARK.bg);
+        assert!(!h.app.s.look.dark, "left alone when the setting is off");
+        theme::set_mode(&h.ctx, ThemeMode::System);
+        h.frames(3);
+        // the dock follows the palette
+        let st = theme::dock_style(&h.ctx);
+        assert_eq!(st.tab.tab_body.bg_fill, theme::pal_ctx(&h.ctx).bg_elevated);
+    }
+
+    #[test]
+    fn settings_dialog_draws_and_defaults_come_back() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.app.show_settings = true;
+        h.frames(4);
+        assert!(h.app.show_settings);
+        let d = crate::config::Settings::default();
+        assert!(d.show_toolbar && d.show_tooltips && d.restore_layout && d.graph_follows_theme && d.animate_view);
+        // old settings files (without the new fields) still load
+        let old: crate::config::Settings = serde_json::from_str(r#"{"recent":["a.grapht"],"animate_view":false}"#).unwrap();
+        assert_eq!(old.recent, ["a.grapht"]);
+        assert!(!old.animate_view && old.show_toolbar && old.theme == crate::theme::ThemeMode::Dark);
+        // hiding the toolbar leaves the graph drawn
+        h.app.settings.show_toolbar = false;
+        h.app.settings.show_tooltips = false;
+        h.app.settings.show_frame_time = false;
+        h.frames(3);
+        assert!(h.app.view.toolbar_rect.is_none());
+    }
+
+    #[test]
+    fn filtered_out_nodes_are_dimmed_not_removed_and_cannot_be_clicked() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(30);
+        assert_eq!(h.app.s.look.filtered, crate::model::FilteredMode::Dim, "dimming is the default");
+        h.app.s.filter.expr_text = "age > 40".into();
+        h.app.refilter();
+        h.frames(3);
+        let n = h.app.s.g.n();
+        let (vis, dim) = (h.app.s.n_vis, h.app.s.dimmed.iter().filter(|d| **d).count());
+        assert!(vis > 0 && vis < n);
+        assert_eq!(vis + dim, n, "everything the filter removed is dimmed");
+        assert!(h.app.draw.nodes.len() > vis, "the dimmed nodes are drawn too");
+        assert!(h.app.draw.nodes.iter().filter(|d| d.rgba[3] < 60).count() >= dim / 2, "and they are faint");
+        // a dimmed node cannot be picked
+        let size = h.app.canvas_size;
+        for i in (0..n).filter(|&i| h.app.s.dimmed[i]).take(40) {
+            let p = h.app.cam.to_screen(h.app.s.pos[i], size);
+            if let Some(hit) = crate::model::pick_node(&h.app.s, &h.app.cam, size, p) {
+                assert!(h.app.s.vis[hit], "picked a dimmed node");
+            }
+        }
+        // a hand-hidden node is gone, not dimmed
+        let gone = (0..n).find(|&i| h.app.s.vis[i]).unwrap();
+        h.app.s.select_only(gone);
+        h.app.s.hide_selected();
+        h.app.refilter();
+        assert!(!h.app.s.dimmed[gone]);
+        // with "Hide" the filtered-out nodes leave the picture
+        h.app.s.look.filtered = crate::model::FilteredMode::Hide;
+        h.frames(3);
+        assert!(h.app.draw.nodes.len() <= h.app.s.n_vis);
+    }
+
+    #[test]
+    fn subgraph_contraction_leaves_no_removed_node_on_screen() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(10);
+        let col = h.app.s.g.node_col("role").expect("sample has a role column");
+        let mut rule = crate::model::Rule::new_for(col);
+        if let crate::model::RuleKind::Cats { allowed } = &mut rule.kind {
+            allowed.iter_mut().for_each(|a| *a = false);
+            allowed[0] = true;
+        }
+        h.app.s.sub = crate::subgraph::SubSettings { enabled: true, rule: Some(rule), hops: 0, connect: true, contract: true };
+        h.app.s.apply_subgraph();
+        h.frames(10);
+        let info = h.app.s.sub_info.clone().unwrap();
+        assert!(info.n_match > 0 && info.n_match < 1200);
+        assert_eq!(h.app.s.n_vis, info.n_match, "only matching nodes stay: the others are contracted away");
+        assert_eq!(info.n_connectors, 0);
+        assert!(h.app.s.vis.iter().zip(&info.member).all(|(v, m)| !*v || *m));
+        assert!(h.app.draw.nodes.len() <= info.n_match);
+        // keeping the in-between nodes brings them back
+        h.app.s.sub.contract = false;
+        h.app.s.apply_subgraph();
+        h.frames(5);
+        let kept = h.app.s.sub_info.clone().unwrap();
+        assert!(kept.bridges.is_empty());
+        assert!(h.app.s.n_vis >= info.n_match);
+        // and the contracted view lays out and saves
+        h.app.s.sub.contract = true;
+        h.app.s.apply_subgraph();
+        h.frames(5);
+        assert!(h.app.s.n_vis_edges >= info.bridges.len());
+    }
+
+    #[test]
+    fn section_box_dims_hides_and_its_lines_can_be_grabbed() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(40);
+        h.app.set_section(true);
+        assert!(h.app.s.section.placed);
+        h.frames(3);
+        let n = h.app.s.g.n();
+        assert!(h.app.s.section_outside().unwrap().iter().all(|o| !*o), "fitted around everything: nothing is cut yet");
+        // cut away the right half
+        let mid = (h.app.s.section.min[0] + h.app.s.section.max[0]) * 0.5;
+        h.app.s.section.max[0] = mid;
+        h.frames(3);
+        let out = h.app.s.section_outside().unwrap();
+        let cut = out.iter().filter(|o| **o).count();
+        assert!(cut > 0 && cut < n);
+        assert_eq!(h.app.s.section.outside, crate::section::Outside::Hide, "outside is cut by default");
+        h.app.s.section.outside = crate::section::Outside::Dim;
+        h.frames(3);
+        assert!(h.app.draw.nodes.iter().filter(|d| d.rgba[3] <= 26).count() > 0, "dim mode: the cut nodes are faint");
+        // hide mode: they are gone and cannot be clicked
+        h.app.s.section.outside = crate::section::Outside::Hide;
+        h.frames(3);
+        // the force layout keeps moving the nodes, so look at the cut as it is now
+        let out = h.app.s.section_outside().unwrap();
+        let cut = out.iter().filter(|o| **o).count();
+        assert!(h.app.draw.nodes.len() <= n - cut, "{} drawn, {} outside", h.app.draw.nodes.len(), cut);
+        let size = h.app.canvas_size;
+        let i = (0..n).find(|&i| out[i]).unwrap();
+        let p = h.app.cam.to_screen(h.app.s.pos[i], size);
+        if let Some(hit) = crate::model::pick_node(&h.app.s, &h.app.cam, size, p) {
+            assert!(!out[hit], "a hidden node was picked");
+        }
+        // the upper x line can be grabbed on screen, and a lower line that is off cannot
+        let line_x = h.app.cam.to_screen(egui::Vec2::new(mid, 0.0), size).x;
+        let y_mid = size.y * 0.5;
+        assert_eq!(h.app.section_hit(egui::Vec2::new(line_x + 2.0, y_mid), size)[0], Some(1));
+        assert_eq!(h.app.section_hit(egui::Vec2::new(line_x + 60.0, y_mid), size), [None, None]);
+        h.app.s.section.side_on[0][1] = false;
+        assert_eq!(h.app.section_hit(egui::Vec2::new(line_x, y_mid), size)[0], None);
+        // all lines off cuts nothing; the panel and the 3D wire box draw
+        h.app.s.section.side_on = [[false; 2]; 3];
+        assert!(h.app.s.section_outside().is_none());
+        h.app.s.section.side_on = [[true; 2]; 3];
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Section);
+        h.app.dock = Some(dock);
+        h.frames(4);
+        // survives a session round trip
+        let pf = h.app.build_project(None);
+        let text = serde_json::to_string(&pf).unwrap();
+        let back: crate::project::ProjectFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.section.max[0], mid);
+        assert!(back.section.enabled && back.section.placed);
+    }
+
+    #[test]
+    fn dragging_a_3d_section_arrow_pushes_the_side_into_the_graph() {
+        let mut h = harness_3d();
+        h.app.set_section(true);
+        h.frames(4);
+        let size = h.app.canvas_size;
+        let handles = h.app.section_handles(size);
+        assert!(handles.len() >= 4, "arrows on the sides: {}", handles.len());
+        let (axis, side, c, tip, _) = handles[0];
+        let before = if side == 0 { h.app.s.section.min[axis] } else { h.app.s.section.max[axis] };
+        let origin = h.app.canvas_rect.min.to_vec2();
+        let mid = c + (tip - c) * 0.5 + origin;
+        assert_eq!(h.app.section_hit3(mid.to_vec2() - origin, size), Some((axis, side)));
+        // drag it inwards (against its arrow)
+        let inward = (c - tip).normalized() * 40.0;
+        h.drag(mid, mid + inward);
+        let after = if side == 0 { h.app.s.section.min[axis] } else { h.app.s.section.max[axis] };
+        assert!(if side == 0 { after > before } else { after < before }, "{before} -> {after}");
+        assert!(h.app.s.section_outside().unwrap().iter().any(|o| *o), "something is cut now");
+        assert!(h.app.section_drag3.is_none());
+        // framing ignores what the section cuts away
+        let all = h.app.s.cam3_fit_target().dist;
+        h.app.s.section.outside = crate::section::Outside::Hide;
+        h.app.s.set_selected(0, true);
+        h.app.s.fit_section(true);
+        h.app.s.section.side_on = [[true; 2]; 3];
+        assert!(h.app.s.cam3_fit_target().dist < all, "framing follows the section: {} vs {all}", h.app.s.cam3_fit_target().dist);
+    }
+
+    #[test]
+    fn workspace_templates_are_valid_and_roundtrip() {
+        for (name, d) in crate::dock::builtin_workspaces() {
+            assert!(crate::dock::is_sane(&d), "{name}");
+            let text = crate::config::layout_to_string(&d).unwrap();
+            let w = crate::config::Workspace { name: name.to_string(), layout: text };
+            assert!(w.dock().is_some_and(|b| crate::dock::is_sane(&b)), "{name} loads back");
+        }
+        let mut d = crate::dock::default_dock();
+        crate::dock::close_all_panels(&mut d);
+        assert!(crate::dock::is_sane(&d));
+        assert_eq!(d.iter_all_tabs().count(), 1, "only the graph is left");
+        // the save dialog stores the current arrangement under a name and replaces by name
+        let mut h = Harness::new();
+        h.frames(2);
+        h.app.ws_dialog = Some(WsDialog { name: "Review".into() });
+        h.frames(3);
+        assert!(h.app.ws_dialog.is_some());
+        let text = crate::config::layout_to_string(h.app.dock.as_ref().unwrap()).unwrap();
+        h.app.workspaces.push(crate::config::Workspace { name: "Review".into(), layout: text });
+        assert!(h.app.workspaces[0].dock().is_some());
+    }
+
+    #[test]
+    fn info_text_sits_at_the_top_left_and_the_subgraph_tab_has_three_parts() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(30);
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Subgraph);
+        h.app.dock = Some(dock);
+        h.frames(4);
+        // contract by an attribute through the session, as the panel does
+        let col = h.app.s.g.node_col("role").unwrap();
+        let mut rule = crate::model::Rule::new_for(col);
+        if let crate::model::RuleKind::Cats { allowed } = &mut rule.kind {
+            allowed.iter_mut().for_each(|a| *a = false);
+            allowed[0] = true;
+        }
+        let n = h.app.s.g.n();
+        h.app.s.contract = crate::subgraph::ContractSettings { enabled: true, rule: Some(rule), ..Default::default() };
+        h.app.s.apply_subgraph();
+        h.frames(10);
+        let ci = h.app.s.contract_info.clone().unwrap();
+        assert!(ci.n_removed > 0 && ci.n_removed < n);
+        assert_eq!(h.app.s.n_vis, n - ci.n_removed);
+        assert!(h.app.draw.nodes.len() <= n - ci.n_removed, "removed nodes are not drawn");
+        assert!(!ci.bridges.is_empty(), "the sample is connected through those nodes");
+        // the added links can be hidden without changing the graph
+        h.app.s.contract.show_links = false;
+        h.frames(3);
+        let hidden = h.app.draw.edges.len();
+        h.app.s.contract.show_links = true;
+        h.frames(3);
+        assert!(h.app.draw.edges.len() > hidden, "{} with links, {hidden} without", h.app.draw.edges.len());
+        // it combines with a subgraph and with the filter
+        h.app.s.filter.expr_text = "age > 30".into();
+        h.app.refilter();
+        h.frames(3);
+        assert!(h.app.s.n_vis < n - ci.n_removed);
+        // switching it off brings every node back
+        h.app.s.filter.expr_text.clear();
+        h.app.refilter();
+        h.app.s.contract.enabled = false;
+        h.app.s.apply_subgraph();
+        h.frames(5);
+        assert_eq!(h.app.s.n_vis, n);
+        // a saved session keeps it
+        let pf = h.app.build_project(None);
+        let back: crate::project::ProjectFile = serde_json::from_str(&serde_json::to_string(&pf).unwrap()).unwrap();
+        assert!(back.contract.rule.is_some());
     }
 
     #[test]

@@ -257,15 +257,21 @@ impl App {
         let t_p = std::time::Instant::now();
         self.paint_graph(&painter, rect);
         self.paint_labels(&painter, rect);
+        self.paint_section(&painter, rect);
         self.paint_overlays(&painter, rect);
         self.paint_region(&painter, rect);
         self.prof.add(3, t_p);
-        if let Some(tool) = self.toolbar(ui, rect) {
-            self.run_tool(tool);
+        if self.settings.show_toolbar {
+            if let Some(tool) = self.toolbar(ui, rect) {
+                self.run_tool(tool);
+            }
+        } else {
+            self.view.buttons.clear();
+            self.view.toolbar_rect = None;
         }
 
         // tooltip
-        if let (Some(h), None, None) = (self.hover, self.drag_node, self.box_start) {
+        if let (Some(h), None, None, true) = (self.hover, self.drag_node, self.box_start, self.settings.show_tooltips && self.section_drag.is_none()) {
             resp.clone().on_hover_ui_at_pointer(|ui| {
                 ui.set_max_width(320.0);
                 ui.strong(self.s.label_of(h));
@@ -370,10 +376,33 @@ impl App {
             return;
         }
 
+        // a section line under the pointer is grabbed before any node
+        let on_line = match (resp.hovered(), ptr, self.section_drag) {
+            (_, _, Some(h)) => h,
+            (true, Some(p), None) => self.section_hit(Vec2::new(p.x, p.y), size),
+            _ => [None, None],
+        };
+        if on_line != [None, None] {
+            ui.ctx().set_cursor_icon(match on_line {
+                [Some(_), Some(_)] => egui::CursorIcon::ResizeNwSe,
+                [Some(_), None] => egui::CursorIcon::ResizeHorizontal,
+                _ => egui::CursorIcon::ResizeVertical,
+            });
+        }
+
+        let on_arrow = match (resp.hovered(), ptr, self.section_drag3) {
+            (_, _, Some(h)) => Some(h),
+            (true, Some(p), None) => self.section_hit3(Vec2::new(p.x, p.y), size),
+            _ => None,
+        };
+        if on_arrow.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
         // hover
         if self.drag_node.is_none() && self.box_start.is_none() {
             self.hover = match (resp.hovered(), ptr) {
-                (true, Some(p)) => pick_node(&self.s, &self.cam, size, Vec2::new(p.x, p.y)),
+                (true, Some(p)) if on_line == [None, None] && on_arrow.is_none() => pick_node(&self.s, &self.cam, size, Vec2::new(p.x, p.y)),
                 _ => None,
             };
             if self.hover.is_some() {
@@ -387,8 +416,13 @@ impl App {
             let origin = ui.input(|i| i.pointer.press_origin());
             let space = ui.input(|i| i.key_down(egui::Key::Space));
             self.view.pan_drag = space;
+            let line = origin.map_or([None, None], |o| self.section_hit(o - rect.min, size));
             if space {
                 self.view.space_used = true;
+            } else if line != [None, None] {
+                self.section_drag = Some(line);
+            } else if let Some(h) = origin.and_then(|o| self.section_hit3(o - rect.min, size)) {
+                self.section_drag3 = Some(h);
             } else if mods.shift {
                 self.box_start = origin.or_else(|| resp.interact_pointer_pos());
             } else {
@@ -409,7 +443,27 @@ impl App {
         }
         // dragging
         if resp.dragged_by(egui::PointerButton::Primary) {
-            if let Some(h) = self.drag_node {
+            if let Some((axis, side)) = self.section_drag3 {
+                if let Some((_, _, _, _, sv)) = self.section_handles(size).into_iter().find(|h| h.0 == axis && h.1 == side) {
+                    let d = resp.drag_delta();
+                    let t = (d.x * sv.x + d.y * sv.y) / sv.length_sq().max(1e-9);
+                    let sec = &mut self.s.section;
+                    if side == 0 { sec.min[axis] += t } else { sec.max[axis] += t }
+                    sec.normalise();
+                }
+                ui.ctx().request_repaint();
+            } else if let Some(handle) = self.section_drag {
+                let delta = resp.drag_delta() / self.cam.zoom;
+                let sec = &mut self.s.section;
+                for (axis, side) in handle.iter().enumerate() {
+                    if let Some(side) = side {
+                        let d = if axis == 0 { delta.x } else { delta.y };
+                        if *side == 0 { sec.min[axis] += d } else { sec.max[axis] += d }
+                    }
+                }
+                self.s.section.normalise();
+                ui.ctx().request_repaint();
+            } else if let Some(h) = self.drag_node {
                 let delta = resp.drag_delta() / self.cam.zoom;
                 if self.s.sel[h] && self.s.sel_count > 1 {
                     for i in 0..self.s.g.n() {
@@ -453,6 +507,8 @@ impl App {
         // drag end
         if resp.drag_stopped() {
             self.view.pan_drag = false;
+            self.section_drag = None;
+            self.section_drag3 = None;
             if let Some(start) = self.box_start.take() {
                 if let Some(end) = resp.interact_pointer_pos() {
                     let r = Rect::from_two_pos(start, end);
@@ -461,7 +517,7 @@ impl App {
                     }
                     let proj = self.s.projector(&self.cam, size);
                     for i in 0..self.s.g.n() {
-                        if self.s.vis[i] {
+                        if self.s.vis[i] && !self.s.section_hides(i) {
                             if let Some((sp, _, _)) = proj.at(&self.s, i) {
                                 if r.contains((sp + rect.min.to_vec2()).to_pos2()) {
                                     self.s.set_selected(i, true);
@@ -744,6 +800,180 @@ impl App {
         }
     }
 
+    /// Which section lines (flat view) are within reach of `p`, given relative to the canvas: `[x line, y line]`, each
+    /// the side (0 = lower, 1 = upper) that was hit. Both set means a corner.
+    pub fn section_hit(&self, p: Vec2, size: Vec2) -> [Option<usize>; 2] {
+        let sec = &self.s.section;
+        if !sec.enabled || !sec.placed || !sec.show_frame || self.s.is_3d() || self.view.region_on {
+            return [None, None];
+        }
+        let grab = 6.0;
+        let at = |x: f32, y: f32| self.cam.to_screen(Vec2::new(x, y), size);
+        let (lo, hi) = (at(sec.min[0], sec.min[1]), at(sec.max[0], sec.max[1]));
+        // the span of a line along the other axis: the box, or unlimited where the box has no end
+        let span = |axis_on: [bool; 2], a: f32, b: f32| -> (f32, f32) {
+            (if axis_on[0] { a - grab } else { f32::NEG_INFINITY }, if axis_on[1] { b + grab } else { f32::INFINITY })
+        };
+        let (y0, y1) = span(sec.side_on[1], lo.y, hi.y);
+        let (x0, x1) = span(sec.side_on[0], lo.x, hi.x);
+        let mut hit = [None, None];
+        for (side, x) in [(0usize, lo.x), (1, hi.x)] {
+            if sec.side_on[0][side] && (p.x - x).abs() <= grab && p.y >= y0 && p.y <= y1 {
+                hit[0] = Some(side);
+            }
+        }
+        for (side, y) in [(0usize, lo.y), (1, hi.y)] {
+            if sec.side_on[1][side] && (p.y - y).abs() <= grab && p.x >= x0 && p.x <= x1 {
+                hit[1] = Some(side);
+            }
+        }
+        hit
+    }
+
+    /// The 3D section arrows: (axis, side, centre on screen, arrow tip, screen movement per world unit along +axis).
+    pub fn section_handles(&self, size: Vec2) -> Vec<(usize, usize, Pos2, Pos2, Vec2)> {
+        let sec = &self.s.section;
+        let mut out = Vec::new();
+        if !self.s.is_3d() || !sec.enabled || !sec.placed || !sec.show_frame || self.view.region_on {
+            return out;
+        }
+        let o = self.s.cam3.orbit(size);
+        for axis in 0..3 {
+            for side in 0..2 {
+                if !sec.side_on[axis][side] {
+                    continue;
+                }
+                let mut c3 = [0.0f32; 3];
+                for j in 0..3 {
+                    c3[j] = if j == axis { if side == 0 { sec.min[j] } else { sec.max[j] } } else { (sec.min[j] + sec.max[j]) * 0.5 };
+                }
+                let unit = ((sec.max[axis] - sec.min[axis]) * 0.1).max(1e-3);
+                let mut c4 = c3;
+                c4[axis] += unit;
+                let (Some((p0, _, _)), Some((p1, _, _))) = (o.project(c3), o.project(c4)) else { continue };
+                let sv = Vec2::new(p1.x - p0.x, p1.y - p0.y) / unit;
+                let len = sv.length() * unit;
+                if len < 3.0 {
+                    continue; // looking straight along this axis: use the sliders
+                }
+                let dir = sv.normalized() * if side == 0 { -1.0 } else { 1.0 };
+                let c = Pos2::new(p0.x, p0.y);
+                out.push((axis, side, c, c + dir * 40.0, sv));
+            }
+        }
+        out
+    }
+
+    /// The 3D section arrow within reach of `p` (relative to the canvas).
+    pub fn section_hit3(&self, p: Vec2, size: Vec2) -> Option<(usize, usize)> {
+        let p = Pos2::new(p.x, p.y);
+        let mut best: Option<(f32, usize, usize)> = None;
+        for (axis, side, c, tip, _) in self.section_handles(size) {
+            let ab = tip - c;
+            let t = ((p - c).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+            let d = (p - (c + ab * t)).length();
+            let d = if (p - tip).length() < 12.0 { d.min((p - tip).length() - 4.0) } else { d };
+            if d <= 8.0 && best.is_none_or(|b| d < b.0) {
+                best = Some((d, axis, side));
+            }
+        }
+        best.map(|b| (b.1, b.2))
+    }
+
+    /// The section box: a rectangle with draggable sides in the flat view, a wire box in 3D.
+    fn paint_section(&self, painter: &Painter, rect: Rect) {
+        let sec = &self.s.section;
+        if !self.s.section_active() || !sec.show_frame {
+            return;
+        }
+        let off = rect.min.to_vec2();
+        let size = rect.size();
+        let t = self.s.look.text_color();
+        let ink = Color32::from_rgb(t[0], t[1], t[2]);
+        let on_line = self.section_drag.unwrap_or([None, None]);
+        if !self.s.is_3d() {
+            let at = |x: f32, y: f32| self.cam.to_screen(Vec2::new(x, y), size) + off;
+            let (lo, hi) = (at(sec.min[0], sec.min[1]), at(sec.max[0], sec.max[1]));
+            let bg = self.s.look.background();
+            let shade = Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], 70);
+            // shade the part that is cut away
+            if !sec.invert {
+                if sec.side_on[0][0] {
+                    painter.rect_filled(Rect::from_min_max(rect.left_top(), Pos2::new(lo.x.clamp(rect.left(), rect.right()), rect.bottom())), 0.0, shade);
+                }
+                if sec.side_on[0][1] {
+                    painter.rect_filled(Rect::from_min_max(Pos2::new(hi.x.clamp(rect.left(), rect.right()), rect.top()), rect.right_bottom()), 0.0, shade);
+                }
+                if sec.side_on[1][0] {
+                    painter.rect_filled(Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), lo.y.clamp(rect.top(), rect.bottom()))), 0.0, shade);
+                }
+                if sec.side_on[1][1] {
+                    painter.rect_filled(Rect::from_min_max(Pos2::new(rect.left(), hi.y.clamp(rect.top(), rect.bottom())), rect.right_bottom()), 0.0, shade);
+                }
+            }
+            let (y_from, y_to) = (if sec.side_on[1][0] { lo.y } else { rect.top() }, if sec.side_on[1][1] { hi.y } else { rect.bottom() });
+            let (x_from, x_to) = (if sec.side_on[0][0] { lo.x } else { rect.left() }, if sec.side_on[0][1] { hi.x } else { rect.right() });
+            let clip = painter.with_clip_rect(rect);
+            for (side, x) in [(0usize, lo.x), (1, hi.x)] {
+                if sec.side_on[0][side] {
+                    let w = if on_line[0] == Some(side) { 2.6 } else { 1.6 };
+                    clip.add(Shape::dashed_line(&[Pos2::new(x, y_from), Pos2::new(x, y_to)], Stroke::new(w, ink), 8.0, 5.0));
+                    {
+                        let mid = Pos2::new(x, (y_from + y_to) * 0.5);
+                        let s = if side == 0 { -1.0 } else { 1.0 };
+                        let (shaft_to, tip) = (mid + Vec2::new(s * 20.0, 0.0), mid + Vec2::new(s * 30.0, 0.0));
+                        clip.line_segment([mid, shaft_to], Stroke::new(w, ink));
+                        clip.add(Shape::convex_polygon(vec![tip, shaft_to + Vec2::new(0.0, -6.0), shaft_to + Vec2::new(0.0, 6.0)], ink, Stroke::NONE));
+                    }
+                }
+            }
+            for (side, y) in [(0usize, lo.y), (1, hi.y)] {
+                if sec.side_on[1][side] {
+                    let w = if on_line[1] == Some(side) { 2.6 } else { 1.6 };
+                    clip.add(Shape::dashed_line(&[Pos2::new(x_from, y), Pos2::new(x_to, y)], Stroke::new(w, ink), 8.0, 5.0));
+                    {
+                        let mid = Pos2::new((x_from + x_to) * 0.5, y);
+                        let s = if side == 0 { -1.0 } else { 1.0 };
+                        let (shaft_to, tip) = (mid + Vec2::new(0.0, s * 20.0), mid + Vec2::new(0.0, s * 30.0));
+                        clip.line_segment([mid, shaft_to], Stroke::new(w, ink));
+                        clip.add(Shape::convex_polygon(vec![tip, shaft_to + Vec2::new(-6.0, 0.0), shaft_to + Vec2::new(6.0, 0.0)], ink, Stroke::NONE));
+                    }
+                }
+            }
+            return;
+        }
+        // 3D: the twelve edges; one that lies in two switched-on planes is drawn strongly, in one plane faintly
+        let o = self.s.cam3.orbit(size);
+        for (k, &(a, b, axis)) in crate::section::EDGES.iter().enumerate() {
+            let _ = k;
+            let (p, q) = (crate::section::corner(sec, a), crate::section::corner(sec, b));
+            let mut planes_on = 0;
+            for j in (0..3).filter(|&j| j != axis) {
+                let side = if p[j] == sec.min[j] { 0 } else { 1 };
+                if sec.side_on[j][side] {
+                    planes_on += 1;
+                }
+            }
+            if planes_on == 0 {
+                continue;
+            }
+            if let Some((s0, s1)) = o.clip_segment(p, q) {
+                let alpha = if planes_on == 2 { 230 } else { 90 };
+                painter.line_segment([s0.to_pos2() + off, s1.to_pos2() + off], Stroke::new(1.5, Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), alpha)));
+            }
+        }
+        // an arrow on every active side: drag it to push the side into the graph or pull it out
+        for (axis, side, c, tip, _) in self.section_handles(size) {
+            let w = if self.section_drag3 == Some((axis, side)) { 3.2 } else { 2.2 };
+            let (c, tip) = (c + off, tip + off);
+            let d = (tip - c).normalized();
+            let n = Vec2::new(-d.y, d.x);
+            painter.circle_filled(c, 3.5, ink);
+            painter.line_segment([c, tip - d * 8.0], Stroke::new(w, ink));
+            painter.add(Shape::convex_polygon(vec![tip, tip - d * 12.0 + n * 6.0, tip - d * 12.0 - n * 6.0], ink, Stroke::NONE));
+        }
+    }
+
     fn paint_labels(&self, painter: &Painter, rect: Rect) {
         if self.s.look.labels == LabelMode::Never && self.hover.is_none() && self.s.sel_count == 0 {
             return;
@@ -809,6 +1039,9 @@ impl App {
         if self.s.sel_count > 0 {
             txt += &format!(" · {} selected", self.s.sel_count);
         }
+        if self.s.section_active() {
+            txt += if self.s.section.outside == crate::section::Outside::Hide { " · section box (outside hidden)" } else { " · section box" };
+        }
         if self.s.sim.running && !self.sim_paused {
             txt += &format!(" · layout running ({:.0}%)", (1.0 - (self.s.sim.alpha - crate::layout::ALPHA_MIN).max(0.0)) * 100.0);
         } else if self.sim_paused && self.s.layout.kind == LayoutKind::Force {
@@ -817,7 +1050,7 @@ impl App {
         if self.s.is_3d() {
             txt += " · drag to orbit · right-drag to pan · scroll to zoom";
         }
-        painter.text(rect.left_bottom() + Vec2::new(10.0, -10.0), Align2::LEFT_BOTTOM, txt, FontId::proportional(12.0), tc);
+        painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, txt, FontId::proportional(12.0), tc);
         if self.s.is_3d() {
             self.paint_gizmo(painter, rect, tc);
         }

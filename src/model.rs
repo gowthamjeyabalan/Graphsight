@@ -9,8 +9,9 @@ use crate::expr;
 use crate::graph::{Graph, build_graph};
 use crate::layout::*;
 use crate::query::{self, QueryInfo, QueryMode, QuerySettings, XTab};
+use crate::section::{Outside, SectionSettings};
 use crate::style::*;
-use crate::subgraph::{self, SubInfo, SubSettings};
+use crate::subgraph::{self, ContractInfo, ContractSettings, SubInfo, SubSettings};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use egui::Vec2 as V2;
@@ -89,7 +90,7 @@ impl Default for Look {
             labels: LabelMode::Auto,
             label_by: None,
             highlight_hood: true,
-            filtered: FilteredMode::Hide,
+            filtered: FilteredMode::Dim,
             dark: true,
         }
     }
@@ -333,6 +334,13 @@ pub struct Session {
     pub change_info: Option<ChangeInfo>,
     pub sub: SubSettings,
     pub sub_info: Option<SubInfo>,
+    /// Nodes taken out by attribute, with their neighbours linked directly (graph contraction).
+    pub contract: ContractSettings,
+    pub contract_info: Option<ContractInfo>,
+    /// The section box / section lines that cut the viewport.
+    pub section: SectionSettings,
+    /// Nodes that only the filter takes out. With "Dim" they stay on screen, faded; they cannot be clicked.
+    pub dimmed: Vec<bool>,
     /// The connection query (settings, and the result of the last run; at most one of the two results is set).
     pub query: QuerySettings,
     pub query_info: Option<QueryInfo>,
@@ -382,6 +390,10 @@ impl Default for Session {
             change_info: None,
             sub: SubSettings::default(),
             sub_info: None,
+            contract: ContractSettings::default(),
+            contract_info: None,
+            section: SectionSettings::default(),
+            dimmed: vec![],
             query: QuerySettings::default(),
             query_info: None,
             xtab: None,
@@ -521,6 +533,9 @@ impl Session {
         if self.sub.rule.as_ref().is_some_and(|r| self.g.node_col(&r.col).is_none()) {
             self.sub.rule = None;
         }
+        if self.contract.rule.as_ref().is_some_and(|r| self.g.node_col(&r.col).is_none()) {
+            self.contract.rule = None;
+        }
         self.drop_missing_query_columns();
         for c in [&mut self.coords.x, &mut self.coords.y, &mut self.coords.z] {
             if c.as_ref().is_some_and(|name| self.g.node_col(name).is_none()) {
@@ -536,6 +551,7 @@ impl Session {
         self.coords_xform = None;
         self.recompute_boxes();
         self.recompute_subgraph();
+        self.recompute_contract();
         self.recompute_visibility();
         self.recompute_style();
         if self.coords.enabled {
@@ -569,6 +585,15 @@ impl Session {
                 }
             }
         }
+        if let Some(ci) = &self.contract_info {
+            if ci.removed.len() == n {
+                for i in 0..n {
+                    vis[i] &= !ci.removed[i];
+                }
+            }
+        }
+        // what the filter below takes out is only dimmed; hand-hidden nodes and nodes outside the subgraph are gone
+        let before_filter = vis.clone();
         for r in self.filter.rules.iter().filter(|r| r.enabled) {
             subgraph::rule_pass(g, r, &mut vis);
         }
@@ -598,7 +623,12 @@ impl Session {
             }
         }
         self.n_vis = vis.iter().filter(|v| **v).count();
-        self.n_vis_edges = g.edges.iter().filter(|&&(s, t)| vis[s as usize] && vis[t as usize]).count();
+        let mut n_edges = g.edges.iter().filter(|&&(s, t)| vis[s as usize] && vis[t as usize]).count();
+        for list in self.bridge_lists() {
+            n_edges += list.iter().filter(|&&(s, t, _)| vis[s as usize] && vis[t as usize]).count();
+        }
+        self.n_vis_edges = n_edges;
+        self.dimmed = (0..n).map(|i| before_filter[i] && !vis[i]).collect();
         self.vis = vis;
         self.recompute_changes();
         self.recompute_query();
@@ -676,12 +706,36 @@ impl Session {
     pub fn recompute_subgraph(&mut self) {
         self.sub_info = match (&self.sub.rule, self.sub.enabled) {
             (Some(rule), true) if self.g.node_col(&rule.col).is_some() => {
-                let info = subgraph::compute(&self.g, rule, self.sub.hops, self.sub.connect);
+                let info = subgraph::compute(&self.g, rule, self.sub.hops, self.sub.connect, self.sub.contract);
                 // a rule nothing matches would leave an empty canvas: show the whole graph instead
-                if info.n_match == 0 { Some(SubInfo { member: vec![true; self.g.n()], connector: vec![false; self.g.n()], ..info }) } else { Some(info) }
+                if info.n_match == 0 {
+                    Some(SubInfo { member: vec![true; self.g.n()], connector: vec![false; self.g.n()], bridges: vec![], ..info })
+                } else {
+                    Some(info)
+                }
             }
             _ => None,
         };
+    }
+
+    /// Work out which nodes are contracted away (needs the whole graph, so it is cached like the subgraph).
+    pub fn recompute_contract(&mut self) {
+        self.contract_info = match (&self.contract.rule, self.contract.enabled) {
+            (Some(rule), true) if self.g.node_col(&rule.col).is_some() => Some(subgraph::contract_nodes(&self.g, rule)),
+            _ => None,
+        };
+    }
+
+    /// True while nodes are being contracted away (a rule that removes nothing, or everything, does not count).
+    pub fn contract_active(&self) -> bool {
+        self.contract_info.as_ref().is_some_and(|c| c.n_removed > 0 && c.n_removed < self.g.n())
+    }
+
+    /// The links that stand in for contracted or joined-over nodes: from the subgraph and from contraction.
+    pub fn bridge_lists(&self) -> [&[subgraph::Bridge]; 2] {
+        let sub: &[subgraph::Bridge] = self.sub_info.as_ref().filter(|i| i.n_match > 0).map(|i| i.bridges.as_slice()).unwrap_or(&[]);
+        let con: &[subgraph::Bridge] = if self.contract_active() { self.contract_info.as_ref().map(|c| c.bridges.as_slice()).unwrap_or(&[]) } else { &[] };
+        [sub, con]
     }
 
     /// True while a sub-graph is being shown (a rule that matches nothing does not count).
@@ -691,12 +745,14 @@ impl Session {
 
     /// Apply the sub-graph settings: recompute, lay the visible part out afresh, or bring the full layout back.
     pub fn apply_subgraph(&mut self) {
-        if self.sub.enabled && self.sub_saved_pos.is_none() && self.sub.rule.is_some() {
+        let wants = (self.sub.enabled && self.sub.rule.is_some()) || (self.contract.enabled && self.contract.rule.is_some());
+        if wants && self.sub_saved_pos.is_none() {
             self.sub_saved_pos = Some(self.pos.clone());
         }
         self.recompute_subgraph();
+        self.recompute_contract();
         self.recompute_visibility();
-        if self.sub_active() {
+        if self.sub_active() || self.contract_active() {
             self.apply_layout();
         } else if let Some(p) = self.sub_saved_pos.take() {
             if p.len() == self.pos.len() {
@@ -770,11 +826,11 @@ impl Session {
         let mut pts: Vec<[f32; 3]> = if boxes_shown && !self.boxes.show_nodes {
             vec![] // boxes alone: frame just those
         } else {
-            (0..self.g.n()).filter(|&i| self.vis[i]).map(|i| self.pos3[i]).collect()
+            (0..self.g.n()).filter(|&i| self.vis[i] && !self.section_hides(i)).map(|i| self.pos3[i]).collect()
         };
         if boxes_shown {
             let near = self.boxes_near_nodes();
-            let visible: Vec<usize> = (0..self.box_items.len()).filter(|&k| self.vis[self.box_items[k].node as usize]).collect();
+            let visible: Vec<usize> = (0..self.box_items.len()).filter(|&k| { let n = self.box_items[k].node as usize; self.vis[n] && !self.section_hides(n) }).collect();
             // when most boxes sit around their nodes the odd ones out are ignored; when most do not, the boxes
             // are somewhere else altogether (another origin or unit): frame the boxes, since that is what was asked for
             let ignore_far = visible.iter().filter(|&&k| near[k]).count() * 2 >= visible.len();
@@ -843,6 +899,50 @@ impl Session {
 
     pub fn recompute_style(&mut self) {
         self.style = compute_style(&self.g, &self.look);
+    }
+
+    // ── section box / section lines ──
+
+    /// Number of axes the section works on: x and y in the flat view, x, y and z in 3D.
+    pub fn section_dims(&self) -> usize {
+        if self.is_3d() { 3 } else { 2 }
+    }
+
+    /// Where node `i` sits for the section: its layout position, or its 3D position.
+    pub fn section_point(&self, i: usize) -> [f32; 3] {
+        if self.is_3d() { self.pos3[i] } else { [self.pos[i].x, self.pos[i].y, 0.0] }
+    }
+
+    /// True while a section cuts the viewport.
+    pub fn section_active(&self) -> bool {
+        self.section.enabled && self.section.placed && self.section.any_line(self.section_dims())
+    }
+
+    /// Per node: is it outside the section? None while no section is on.
+    pub fn section_outside(&self) -> Option<Vec<bool>> {
+        if !self.section_active() {
+            return None;
+        }
+        let dims = self.section_dims();
+        Some((0..self.g.n()).map(|i| !self.section.keeps(self.section_point(i), dims)).collect())
+    }
+
+    /// Is node `i` outside an active section (dimmed or hidden)?
+    pub fn section_outside_node(&self, i: usize) -> bool {
+        self.section_active() && !self.section.keeps(self.section_point(i), self.section_dims())
+    }
+
+    /// Is node `i` taken out of sight (not just dimmed) by the section?
+    pub fn section_hides(&self, i: usize) -> bool {
+        self.section_active() && self.section.outside == Outside::Hide && !self.section.keeps(self.section_point(i), self.section_dims())
+    }
+
+    /// Fit the section box to the visible nodes (or to the selection).
+    pub fn fit_section(&mut self, selection_only: bool) -> bool {
+        let pts: Vec<[f32; 3]> = (0..self.g.n()).filter(|&i| self.vis[i] && (!selection_only || self.sel[i])).map(|i| self.section_point(i)).collect();
+        let all: Vec<[f32; 3]> = (0..self.g.n()).filter(|&i| self.vis[i]).map(|i| self.section_point(i)).collect();
+        self.section.set_range(all.into_iter());
+        self.section.fit_to(pts.into_iter())
     }
 
     // ── selection ──
@@ -926,7 +1026,7 @@ impl Session {
     // ── layout ──
 
     pub fn active_nodes(&self) -> Vec<u32> {
-        if self.layout.visible_only || self.sub_active() {
+        if self.layout.visible_only || self.sub_active() || self.contract_active() {
             (0..self.g.n() as u32).filter(|&i| self.vis[i as usize]).collect()
         } else {
             (0..self.g.n() as u32).collect()
@@ -944,7 +1044,8 @@ impl Session {
         }
         let active = self.active_nodes();
         let anchors = self.anchors(&active);
-        self.sim.setup(&self.g, &active, &self.layout.force, anchors);
+        let bridges: Vec<(u32, u32)> = self.bridge_lists().into_iter().flatten().map(|&(a, b, _)| (a, b)).collect();
+        self.sim.setup(&self.g, &active, &self.layout.force, anchors, &bridges);
     }
 
     /// Re-run the force problem setup after parameters changed, and warm the simulation up.
@@ -1055,6 +1156,9 @@ impl Session {
         if self.sub.rule.as_ref().is_some_and(|r| g.node_col(&r.col).is_none()) {
             self.sub.rule = None;
         }
+        if self.contract.rule.as_ref().is_some_and(|r| g.node_col(&r.col).is_none()) {
+            self.contract.rule = None;
+        }
         self.drop_missing_query_columns();
     }
 
@@ -1092,7 +1196,7 @@ impl Session {
         let (mut lo, mut hi) = (V2::splat(f32::INFINITY), V2::splat(f32::NEG_INFINITY));
         let mut any = false;
         for i in 0..self.g.n() {
-            if visible_only && !self.vis[i] {
+            if visible_only && (!self.vis[i] || self.section_hides(i)) {
                 continue;
             }
             lo = lo.min(self.pos[i]);
@@ -1106,7 +1210,7 @@ impl Session {
         let Some((mut lo, mut hi)) = self.bounds(true).or_else(|| self.bounds(false)) else { return ViewCam::default() };
         // the force layout can fling a few loose nodes far away: frame the dense core instead
         if self.layout.kind == LayoutKind::Force && self.n_vis >= 40 {
-            let (mut xs, mut ys): (Vec<f32>, Vec<f32>) = (0..self.g.n()).filter(|&i| self.vis[i]).map(|i| (self.pos[i].x, self.pos[i].y)).unzip();
+            let (mut xs, mut ys): (Vec<f32>, Vec<f32>) = (0..self.g.n()).filter(|&i| self.vis[i] && !self.section_hides(i)).map(|i| (self.pos[i].x, self.pos[i].y)).unzip();
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
             ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let n = xs.len();
@@ -1241,6 +1345,12 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         return;
     }
     let dim_hidden = s.look.filtered == FilteredMode::Dim;
+    // a node is on screen if it is visible, or if the filter alone took it out and filtered-out nodes are only dimmed
+    let shown = |i: usize| s.vis[i] || (dim_hidden && s.dimmed.get(i).copied().unwrap_or(false));
+    // section box: nodes outside it are dimmed or dropped
+    let outside = s.section_outside();
+    let section_hide = s.section.outside == Outside::Hide;
+    let out_of = |i: usize| outside.as_ref().is_some_and(|o| o[i]);
     let proj = s.projector(cam, size);
     if let Projector::Orbit(o) = &proj {
         if s.boxes_shown() {
@@ -1279,7 +1389,11 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             return None;
         }
         let both = s.vis[ai] && s.vis[bi];
-        if !both && !dim_hidden {
+        if !(shown(ai) && shown(bi)) {
+            return None;
+        }
+        let cut = out_of(ai) || out_of(bi);
+        if cut && section_hide {
             return None;
         }
         let (Some((pa, _, da)), Some((pb, _, db))) = (pr[ai], pr[bi]) else { return None };
@@ -1292,10 +1406,12 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             if ci.edge_hi[e] {
                 kind = 2;
             } else if s.change.only {
-                if !ci.edge_path[e] {
-                    return None;
+                if ci.edge_path[e] {
+                    alpha *= 0.8; // a joining path: ordinary edge colour, a little softer
+                } else {
+                    alpha *= 0.06; // everything else is only dimmed
+                    kind = 1;
                 }
-                alpha *= 0.8; // a joining path: ordinary edge colour, a little softer
             } else {
                 alpha *= 0.1;
                 kind = 1;
@@ -1308,6 +1424,10 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             kind = 1;
         } else if hi.active {
             alpha = (alpha * 2.5).clamp(0.5, 1.0);
+        }
+        if cut {
+            alpha *= 0.1;
+            kind = if kind == 2 { 1 } else { kind.max(1) };
         }
         if stride > 1 && kind != 2 {
             if e % stride != 0 {
@@ -1363,11 +1483,54 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         }
     }
 
+    // links standing in for contracted nodes: dashed, so they read as "a path used to be here"
+    {
+        let c = base;
+        for (list_no, list) in s.bridge_lists().into_iter().enumerate() {
+          if list_no == 1 && !s.contract.show_links {
+              continue;
+          }
+          for &(a, b, directed) in list {
+            let (ai, bi) = (a as usize, b as usize);
+            if !(s.vis[ai] && s.vis[bi]) || (section_hide && (out_of(ai) || out_of(bi))) {
+                continue;
+            }
+            let (Some((pa, _, da)), Some((pb, _, db))) = (pr[ai], pr[bi]) else { continue };
+            let mut alpha = (ea * 2.2).clamp(0.25, 0.85) * depth_k((da + db) * 0.5, 0.5);
+            if out_of(ai) || out_of(bi) {
+                alpha *= 0.1;
+            }
+            let rgba = [c[0], c[1], c[2], (alpha * 255.0) as u8];
+            let d = pb - pa;
+            let len = d.length();
+            if !len.is_finite() || len < 1.0 {
+                continue;
+            }
+            let dir = d / len;
+            let (dash, gap) = (7.0f32, 5.0f32);
+            let mut t = 0.0f32;
+            let mut guard = 0;
+            while t < len && guard < 4000 {
+                let e = (t + dash).min(len);
+                let (p0, p1) = (pa + dir * t, pa + dir * e);
+                out.edges.push(DrawEdge { a: [p0.x, p0.y], b: [p1.x, p1.y], rgba, target_r: 0.0, directed: false });
+                t += dash + gap;
+                guard += 1;
+            }
+            if directed {
+                // a short solid stretch at the target carries the arrow head
+                let tail = pa + dir * (len - dash.min(len));
+                out.edges.push(DrawEdge { a: [tail.x, tail.y], b: [pb.x, pb.y], rgba, target_r: radius[bi], directed: true });
+            }
+          }
+        }
+    }
+
     // nodes (faded first, then normal)
     let mut faded: Vec<DrawNode> = Vec::new();
     for i in 0..n {
         let visible = s.vis[i];
-        if !visible && !dim_hidden {
+        if !shown(i) || (section_hide && out_of(i)) {
             continue;
         }
         let Some((p, _, depth)) = pr[i] else { continue };
@@ -1382,10 +1545,8 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             if ci.node_hi[i] {
                 ring = true;
             } else if s.change.only {
-                if !ci.node_path[i] {
-                    continue;
-                }
-                alpha = 0.6; // joins pieces together
+                // joins pieces together, or is only dimmed
+                alpha = if ci.node_path[i] { 0.6 } else { 0.12 };
             } else {
                 alpha = 0.3;
             }
@@ -1396,6 +1557,9 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         }
         if s.sub_info.as_ref().is_some_and(|si| si.connector[i]) {
             alpha = alpha.min(0.6);
+        }
+        if out_of(i) {
+            alpha = alpha.min(0.1);
         }
         alpha *= depth_k(depth, 0.35);
         let dn = DrawNode { x: p.x, y: p.y, r, rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], selected: s.sel[i], ring, depth, idx: i as u32 };
@@ -1420,7 +1584,7 @@ fn build_boxes(s: &Session, o: &Orbit, size: V2, hi: &Highlight, out: &mut DrawL
     // hundred are quicker on one thread than the hand-over costs
     let project = |b: &BoxItem| -> Option<DrawBox> {
         let i = b.node as usize;
-        if !s.vis[i] {
+        if !s.vis[i] || s.section_hides(i) {
             return None;
         }
         // the eight corners; whatever is behind the camera is cut off at the near plane
@@ -1464,7 +1628,7 @@ fn build_boxes(s: &Session, o: &Orbit, size: V2, hi: &Highlight, out: &mut DrawL
         // a box much bigger than the view (a site outline) would tint everything: draw only its outline
         let giant = (x1 - x0) > size.x * 4.0 || (y1 - y0) > size.y * 4.0;
         let selected = s.sel[i];
-        let fade = if hi.active && !hi.hood[i] { 0.25 } else { 1.0 };
+        let fade = if hi.active && !hi.hood[i] { 0.25 } else { 1.0 } * if s.section_outside_node(i) { 0.1 } else { 1.0 };
         let rgb = match st.color_mode {
             boxes::BoxColor::Single => st.color,
             boxes::BoxColor::Node => s.style.node_rgb[i],
@@ -1502,7 +1666,7 @@ pub fn pick_node(s: &Session, cam: &ViewCam, size: V2, p: V2) -> Option<usize> {
     let proj = s.projector(cam, size);
     let mut best: Option<(usize, f32, f32)> = None; // index, pixel distance, depth
     for i in 0..s.g.n() {
-        if !s.vis[i] {
+        if !s.vis[i] || s.section_hides(i) {
             continue;
         }
         let Some((sp, scale, depth)) = proj.at(s, i) else { continue };
@@ -1626,6 +1790,9 @@ mod tests {
         assert_eq!(dl.edges.len() + dl.edges_back.len(), 5);
         s.filter.search = "a".into();
         s.recompute_visibility();
+        build_draw_list(&s, &cam, size, &hi, &mut dl);
+        assert_eq!(dl.nodes.len(), 6, "filtered-out nodes are dimmed, not removed (the default)");
+        s.look.filtered = FilteredMode::Hide;
         build_draw_list(&s, &cam, size, &hi, &mut dl);
         assert_eq!(dl.nodes.len(), s.n_vis);
         // zoom far away → everything culled

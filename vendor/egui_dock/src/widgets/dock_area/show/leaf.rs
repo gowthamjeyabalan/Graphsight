@@ -193,13 +193,10 @@ impl<Tab> DockArea<'_, Tab> {
             .hidden_tab_bar_drag_height
             .is_none_or(|h| h > 0.0);
         if self.draggable_tabs && drag_enabled && !on_button {
-            if drag_response.hovered() {
-                ui.output_mut(|o| o.cursor_icon = CursorIcon::Grab);
-            }
+            // Grapht: keep the normal arrow cursor (Windows draws Grab / Grabbing as the four-way "move" cursor).
             let is_being_dragged = ui.ctx().is_being_dragged(drag_id)
                 && ui.input(|i| i.pointer.is_decidedly_dragging());
             if is_being_dragged {
-                ui.output_mut(|o| o.cursor_icon = CursorIcon::Grabbing);
                 let active = self.dock_state[path]
                     .get_leaf()
                     .expect("This node must be a leaf")
@@ -409,10 +406,6 @@ impl<Tab> DockArea<'_, Tab> {
             let is_being_dragged = tabs_ui.ctx().is_being_dragged(id)
                 && tabs_ui.input(|i| i.pointer.is_decidedly_dragging())
                 && self.draggable_tabs;
-
-            if is_being_dragged {
-                tabs_ui.output_mut(|o| o.cursor_icon = CursorIcon::Grabbing);
-            }
 
             let (is_active, label, tab_style, closeable) = {
                 let leaf = self.dock_state[path]
@@ -1107,10 +1100,7 @@ impl<Tab> DockArea<'_, Tab> {
         let tab_width = preferred_width.unwrap_or(0.0).at_least(minimum_width);
 
         let (_, tab_rect) = ui.allocate_space(vec2(tab_width, ui.available_height()));
-        let mut response = ui.interact(tab_rect, id, Sense::click_and_drag());
-        if ui.ctx().dragged_id().is_none() && self.draggable_tabs {
-            response = response.on_hover_cursor(CursorIcon::Grab);
-        }
+        let response = ui.interact(tab_rect, id, Sense::click_and_drag());
 
         let tab_style = if focused || is_being_dragged {
             if response.has_focus() {

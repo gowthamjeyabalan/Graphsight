@@ -12,6 +12,8 @@ const GAP: f32 = 2.0;
 const GROUP_GAP: f32 = 10.0;
 const PAD: f32 = 5.0;
 const MARGIN: f32 = 14.0;
+/// Width kept free at the right edge for the 3D axis gizmo.
+pub const GIZMO_ROOM: f32 = 124.0;
 
 /// Buttons are grouped; a gap separates groups.
 fn main_row() -> Vec<Vec<Tool>> {
@@ -25,14 +27,21 @@ fn main_row() -> Vec<Vec<Tool>> {
 fn row_3d() -> Vec<Vec<Tool>> {
     vec![
         vec![Tool::Nav(NavMode::Orbit), Tool::Nav(NavMode::Pan), Tool::Nav(NavMode::Zoom)],
-        vec![Tool::Preset(View3::Top), Tool::Preset(View3::Front), Tool::Preset(View3::Side), Tool::Preset(View3::Iso)],
+        vec![
+            Tool::Preset(View3::Top),
+            Tool::Preset(View3::Front),
+            Tool::Preset(View3::Back),
+            Tool::Preset(View3::Left),
+            Tool::Preset(View3::Right),
+            Tool::Preset(View3::Iso),
+        ],
         vec![Tool::Perspective],
     ]
 }
 
 fn width_of(t: Tool) -> f32 {
     match t {
-        Tool::Preset(_) => 42.0,
+        Tool::Preset(_) => 40.0,
         Tool::Perspective => 52.0,
         _ => BTN,
     }
@@ -55,41 +64,55 @@ fn row_width(groups: &[Vec<Tool>]) -> f32 {
 }
 
 impl App {
-    /// Draw the toolbar over the canvas and report the button that was clicked.
+    /// Draw the toolbar over the canvas and report the button that was clicked. It is one bar: the 2D tools and,
+    /// in 3D, the viewing-direction tools after them; on a narrow window the groups wrap onto a second line of the
+    /// same bar.
     pub fn toolbar(&mut self, ui: &mut Ui, canvas: Rect) -> Option<Tool> {
         self.view.buttons.clear();
         self.view.toolbar_rect = None;
         if canvas.width() < 120.0 || canvas.height() < 90.0 {
             return None;
         }
-        let three_d = self.s.is_3d();
-        let mut rows = vec![main_row()];
-        if three_d {
-            rows.push(row_3d());
+        let mut groups = main_row();
+        if self.s.is_3d() {
+            groups.extend(row_3d());
         }
-        let row_h = BTN + PAD * 2.0;
+        // in 3D the axis gizmo sits in the bottom-right corner: the bar keeps to the space left of it
+        let canvas = if self.s.is_3d() { Rect::from_min_max(canvas.min, Pos2::new(canvas.right() - GIZMO_ROOM, canvas.bottom())) } else { canvas };
+        // flow the groups into lines that fit the canvas
+        let max_w = (canvas.width() - 8.0).max(120.0);
+        let mut lines: Vec<Vec<Vec<Tool>>> = vec![vec![]];
+        for g in groups {
+            let mut trial = lines.last().cloned().unwrap_or_default();
+            trial.push(g.clone());
+            if row_width(&trial) > max_w && !lines.last().is_some_and(|l| l.is_empty()) {
+                lines.push(vec![g]);
+            } else if let Some(l) = lines.last_mut() {
+                l.push(g);
+            }
+        }
+        let line_gap = 4.0;
+        let bar_w = lines.iter().map(|l| row_width(l)).fold(0.0f32, f32::max).min(max_w);
+        let bar_h = PAD * 2.0 + BTN * lines.len() as f32 + line_gap * (lines.len() - 1) as f32;
+        let x0 = canvas.center().x - bar_w * 0.5;
+        let y1 = canvas.bottom() - MARGIN;
+        let bar = Rect::from_min_max(Pos2::new(x0, y1 - bar_h), Pos2::new(x0 + bar_w, y1));
+        self.bar_background(ui, bar);
         let mut clicked = None;
-        let mut whole: Option<Rect> = None;
-        // the main row sits at the bottom, the 3D row above it
-        for (ri, groups) in rows.iter().enumerate() {
-            let w = row_width(groups).min(canvas.width() - 8.0);
-            let y1 = canvas.bottom() - MARGIN - ri as f32 * (row_h + 6.0);
-            let x0 = canvas.center().x - w * 0.5;
-            let bar = Rect::from_min_max(Pos2::new(x0, y1 - row_h), Pos2::new(x0 + w, y1));
-            whole = Some(whole.map_or(bar, |r| r.union(bar)));
-            self.bar_background(ui, bar);
-            let mut x = bar.left() + PAD;
+        for (li, groups) in lines.iter().enumerate() {
+            let top = bar.top() + PAD + li as f32 * (BTN + line_gap);
+            let mut x = bar.center().x - (row_width(groups) - PAD * 2.0) * 0.5;
             for (gi, g) in groups.iter().enumerate() {
                 if gi > 0 {
                     x += GROUP_GAP;
                     let sx = x - GROUP_GAP * 0.5;
-                    ui.painter().line_segment([Pos2::new(sx, bar.top() + 9.0), Pos2::new(sx, bar.bottom() - 9.0)], Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color));
+                    ui.painter().line_segment([Pos2::new(sx, top + 4.0), Pos2::new(sx, top + BTN - 4.0)], Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color));
                 }
                 for (ti, t) in g.iter().enumerate() {
                     if ti > 0 {
                         x += GAP;
                     }
-                    let r = Rect::from_min_size(Pos2::new(x, bar.top() + PAD), Vec2::new(width_of(*t), BTN));
+                    let r = Rect::from_min_size(Pos2::new(x, top), Vec2::new(width_of(*t), BTN));
                     x += r.width();
                     if self.button(ui, *t, r) {
                         clicked = Some(*t);
@@ -97,7 +120,7 @@ impl App {
                 }
             }
         }
-        self.view.toolbar_rect = whole;
+        self.view.toolbar_rect = Some(bar);
         clicked
     }
 
@@ -240,7 +263,9 @@ fn draw_icon(p: &Painter, t: Tool, r: Rect, ink: Color32, ortho: bool) {
         }
         Tool::Preset(View3::Top) => text("Top"),
         Tool::Preset(View3::Front) => text("Front"),
-        Tool::Preset(View3::Side) => text("Side"),
+        Tool::Preset(View3::Back) => text("Back"),
+        Tool::Preset(View3::Left) => text("Left"),
+        Tool::Preset(View3::Right) => text("Right"),
         Tool::Preset(View3::Iso) => text("Iso"),
         Tool::Perspective => text(if ortho { "Ortho" } else { "Persp" }),
     }

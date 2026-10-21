@@ -65,7 +65,9 @@ impl Tool {
             Tool::Nav(NavMode::Zoom) => "Drag to zoom",
             Tool::Preset(View3::Top) => "Top view",
             Tool::Preset(View3::Front) => "Front view",
-            Tool::Preset(View3::Side) => "Side view",
+            Tool::Preset(View3::Back) => "Back view",
+            Tool::Preset(View3::Left) => "Left view",
+            Tool::Preset(View3::Right) => "Right view",
             Tool::Preset(View3::Iso) => "Isometric view",
             Tool::Perspective => "Switch between perspective and orthographic projection",
         }

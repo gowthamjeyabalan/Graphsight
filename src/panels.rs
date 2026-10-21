@@ -161,6 +161,7 @@ impl App {
             Tab::Analysis => self.section_analysis(ui),
             Tab::Subgraph => self.section_subgraph(ui, &cols),
             Tab::Query => self.section_query(ui, &cols),
+            Tab::Section => self.section_panel(ui),
             Tab::Inspector => self.inspector(ui),
             Tab::Legend => self.legend(ui),
             Tab::Canvas | Tab::Table => {}
@@ -497,9 +498,6 @@ impl App {
                 combo_col(ui, "label_by", &mut look.label_by, cols, false, "(node id)");
             });
             ui.switch(&mut look.highlight_hood, "Fade all but the selection's neighbours");
-            ui.add_space(2.0);
-            ui.label(theme::secondary("Filtered-out nodes"));
-            ui.segmented(&mut look.filtered, &[(FilteredMode::Hide, "Hide"), (FilteredMode::Dim, "Dim")]);
             if restyle {
                 self.restyle();
             }
@@ -516,6 +514,10 @@ impl App {
             // shift auto-generated ids and make the text boxes lose focus after the first typed character)
             ui.label(crate::theme::secondary(title));
             let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(theme::secondary("Nodes that do not pass"));
+                ui.segmented(&mut self.s.look.filtered, &[(FilteredMode::Dim, "Dim"), (FilteredMode::Hide, "Hide")]);
+            });
             changed |= ui.add(egui::TextEdit::singleline(&mut self.s.filter.search).id_salt("filter_search").hint_text("Search id or text…").desired_width(f32::INFINITY)).changed();
             let resp = ui.add(egui::TextEdit::singleline(&mut self.s.filter.expr_text).id_salt("filter_expr").hint_text("Expression: score > 3 and group == \"A\"").desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
             changed |= resp.changed();
@@ -529,7 +531,7 @@ impl App {
             let mut remove: Option<usize> = None;
             for (ri, rule) in self.s.filter.rules.iter_mut().enumerate() {
                 let Some(col) = self.s.g.node_cols.iter().find(|c| c.name == rule.col) else { continue };
-                theme::inner_card().show(ui, |ui| {
+                theme::inner_card(ui).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         changed |= ui.switch(&mut rule.enabled, "").changed();
                         ui.label(crate::theme::semibold(&rule.col));
@@ -800,19 +802,17 @@ impl App {
             ui.weak("Load a graph first.");
             return;
         }
-        self.sub_section(ui, cols);
-        ui.add_space(10.0);
-        ui.separator();
-        ui.add_space(6.0);
-        self.change_section(ui, cols);
+        // three parts, always in this order: what to show, what to contract away, what to highlight
+        egui::CollapsingHeader::new(theme::semibold("Show graph")).id_salt("sg_show").default_open(true).show(ui, |ui| self.sub_section(ui, cols));
+        egui::CollapsingHeader::new(theme::semibold("Contract nodes")).id_salt("sg_contract").default_open(true).show(ui, |ui| self.contract_section(ui, cols));
+        egui::CollapsingHeader::new(theme::semibold("Highlight changes")).id_salt("sg_highlight").default_open(true).show(ui, |ui| self.change_section(ui, cols));
     }
 
     fn sub_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
-        crate::theme::heading(ui, "Show a subgraph");
         ui.weak("Keep only the nodes that match, lay them out again and leave the rest out. Switch it off to get the full graph and its layout back.");
         ui.add_space(4.0);
         let mut dirty = false;
-        dirty |= ui.switch(&mut self.s.sub.enabled, "Show subgraph").changed();
+        dirty |= ui.switch(&mut self.s.sub.enabled, "Show only matching nodes").changed();
         let mut cur = self.s.sub.rule.as_ref().map(|r| r.col.clone());
         row(ui, "Attribute", |ui| {
             if combo_col(ui, "sub_col", &mut cur, cols, false, "(choose an attribute)") {
@@ -831,7 +831,7 @@ impl App {
         });
         if let Some(rule) = &mut self.s.sub.rule {
             if let Some(col) = self.s.g.node_cols.iter().find(|c| c.name == rule.col) {
-                theme::inner_card().show(ui, |ui| {
+                theme::inner_card(ui).show(ui, |ui| {
                     dirty |= rule_body(ui, &mut rule.kind, col, 1000);
                 });
             }
@@ -875,8 +875,59 @@ impl App {
         }
     }
 
+    fn contract_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
+        ui.weak("Take out the nodes with the attribute values you pick and rebuild the graph around them, as in graph contraction: nodes that were linked through a removed node get a direct dashed link, so what was connected stays connected.");
+        ui.add_space(4.0);
+        let mut dirty = false;
+        dirty |= ui.switch(&mut self.s.contract.enabled, "Contract nodes").changed();
+        ui.switch(&mut self.s.contract.show_links, "Show the added dashed links").on_hover_text("Hide them to see only the nodes that remain and the connections they already had.");
+        let mut cur = self.s.contract.rule.as_ref().map(|r| r.col.clone());
+        row(ui, "Remove by", |ui| {
+            if combo_col(ui, "contract_col", &mut cur, cols, false, "(choose an attribute)") {
+                self.s.contract.rule = cur.as_ref().and_then(|c| self.s.g.node_col(c)).map(|col| {
+                    let mut r = Rule::new_for(col);
+                    if let RuleKind::Cats { allowed } = &mut r.kind {
+                        allowed.iter_mut().for_each(|a| *a = false); // tick the values to remove
+                    }
+                    r
+                });
+                if self.s.contract.rule.is_some() {
+                    self.s.contract.enabled = true;
+                }
+                dirty = true;
+            }
+        });
+        if let Some(rule) = &mut self.s.contract.rule {
+            if let Some(col) = self.s.g.node_cols.iter().find(|c| c.name == rule.col) {
+                ui.label(theme::secondary(if matches!(rule.kind, RuleKind::Cats { .. }) { "Tick the values to remove" } else { "Remove nodes with a value in this range" }));
+                theme::inner_card(ui).show(ui, |ui| {
+                    dirty |= rule_body(ui, &mut rule.kind, col, 2000);
+                });
+            }
+        }
+        if dirty {
+            self.s.apply_subgraph();
+            self.table.dirty = true;
+        }
+        if let Some(ci) = self.s.contract_info.clone() {
+            ui.add_space(4.0);
+            let n = self.s.g.n();
+            if ci.n_removed == 0 {
+                ui.weak("Nothing is removed yet. Tick the values to remove above.");
+            } else if ci.n_removed >= n {
+                ui.weak("That would remove every node, so nothing is contracted. Narrow the choice.");
+            } else {
+                ui.label(format!("{} nodes removed, {} remain", ci.n_removed, n - ci.n_removed));
+                ui.label(crate::theme::secondary(format!(
+                    "{} direct {} added where removed nodes used to connect",
+                    ci.bridges.len(),
+                    if ci.bridges.len() == 1 { "link" } else { "links" }
+                )));
+            }
+        }
+    }
+
     fn change_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
-        crate::theme::heading(ui, "Highlight where a value changes");
         ui.weak("Marks the connections whose two ends have different values of an attribute, for example where Level goes from 1 to 2.");
         ui.add_space(4.0);
         let mut dirty = false;
@@ -1060,7 +1111,7 @@ impl App {
             });
             if let Some(rule) = &mut self.s.boxes.rule {
                 if let Some(col) = self.s.g.node_cols.iter().find(|c| c.name == rule.col) {
-                    theme::inner_card().show(ui, |ui| {
+                    theme::inner_card(ui).show(ui, |ui| {
                         recompute |= rule_body(ui, &mut rule.kind, col, 2000);
                     });
                 }
@@ -1172,7 +1223,7 @@ impl App {
             }
             if self.s.is_3d() {
                 ui.horizontal_wrapped(|ui| {
-                    for (label, v) in [("Top", View3::Top), ("Front", View3::Front), ("Side", View3::Side), ("Iso", View3::Iso)] {
+                    for (label, v) in [("Top", View3::Top), ("Front", View3::Front), ("Back", View3::Back), ("Left", View3::Left), ("Right", View3::Right), ("Iso", View3::Iso)] {
                         if ui.small_button(label).clicked() {
                             self.run_tool(crate::view::Tool::Preset(v));
                         }
@@ -1257,7 +1308,7 @@ impl App {
         let mut select: Option<(Vec<usize>, String)> = None;
         if let Some(info) = self.s.query_info.clone() {
             let (first, second) = crate::query::sentences(&self.s.g, &self.s.query, &info);
-            theme::inner_card().show(ui, |ui| {
+            theme::inner_card(ui).show(ui, |ui| {
                 let result_link = |ui: &mut Ui, text: String, n: usize| -> bool {
                     let r = ui
                         .add(egui::Label::new(RichText::new(text).color(ui.visuals().hyperlink_color)).sense(egui::Sense::click()))
@@ -1419,4 +1470,80 @@ fn cond_editor(ui: &mut Ui, id: &str, cond: &mut crate::query::Cond, g: &crate::
 /// A label cut to `n` characters, with an ellipsis if it was longer.
 fn short(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}
+
+// ───────────────────────── section box ─────────────────────────
+
+impl App {
+    pub fn section_panel(&mut self, ui: &mut Ui) {
+        if self.s.g.n() == 0 {
+            ui.weak("Load a graph first.");
+            return;
+        }
+        let dims = self.s.section_dims();
+        crate::theme::heading(ui, "Section box");
+        ui.weak("Cut the view with a box. Nodes outside it are dimmed or hidden. Every side is a section line (a plane in 3D) that can be switched on or off by itself: one line cuts the graph in two, two make a band, all of them a box.");
+        ui.add_space(4.0);
+        let mut on = self.s.section.enabled;
+        if ui.switch(&mut on, "Section box").changed() {
+            self.set_section(on);
+        }
+        let enabled = self.s.section.enabled;
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.label(theme::secondary("Outside the section"));
+            ui.segmented(&mut self.s.section.outside, &[(crate::section::Outside::Dim, "Dim"), (crate::section::Outside::Hide, "Hide")]);
+            ui.switch(&mut self.s.section.show_frame, "Show the box and lines in the view");
+            ui.switch(&mut self.s.section.invert, "Keep what is outside instead");
+            ui.add_space(2.0);
+            let names = ["X", "Y", "Z"];
+            for k in 0..dims {
+                let (lo, hi) = (self.s.section.range_lo[k], self.s.section.range_hi[k]);
+                let (lo, hi) = if hi > lo { (lo.min(self.s.section.min[k]), hi.max(self.s.section.max[k])) } else { (self.s.section.min[k] - 1.0, self.s.section.max[k] + 1.0) };
+                theme::inner_card(ui).show(ui, |ui| {
+                    ui.label(theme::semibold(format!("{} lines", names[k])));
+                    for (side, label) in [(0usize, "from"), (1, "to")] {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.s.section.side_on[k][side], "").on_hover_text("Switch this section line on or off");
+                            ui.label(label);
+                            let on_line = self.s.section.side_on[k][side];
+                            let sec = &mut self.s.section;
+                            let value = if side == 0 { &mut sec.min[k] } else { &mut sec.max[k] };
+                            ui.spacing_mut().slider_width = (ui.available_width() - 80.0).max(60.0);
+                            let changed = ui.add_enabled(on_line, egui::Slider::new(value, lo..=hi).clamping(egui::SliderClamping::Never)).changed();
+                            if changed {
+                                sec.placed = true;
+                                sec.normalise();
+                            }
+                        });
+                    }
+                });
+            }
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Fit to visible nodes").clicked() {
+                    self.s.fit_section(false);
+                }
+                if ui.add_enabled(self.s.sel_count > 0, egui::Button::new("From selection")).clicked() {
+                    self.s.fit_section(true);
+                }
+                if ui.button("All lines on").clicked() {
+                    self.s.section.side_on = [[true; 2]; 3];
+                }
+            });
+            if self.s.section_active() {
+                let (inside, total) = match self.s.section_outside() {
+                    Some(o) => (o.iter().zip(&self.s.vis).filter(|(out, vis)| !**out && **vis).count(), self.s.n_vis),
+                    None => (self.s.n_vis, self.s.n_vis),
+                };
+                ui.label(theme::secondary(format!("{inside} of {total} visible nodes are inside the section")));
+            } else if enabled && !self.s.section.any_line(dims) {
+                ui.label(theme::secondary("All section lines are off, so nothing is cut."));
+            }
+            if self.s.is_3d() {
+                ui.weak("Drag the green arrows on the sides of the box to push them into the graph or pull them out.");
+            } else {
+                ui.weak("Drag a dashed line or its arrow in the view to move it.");
+            }
+        });
+    }
 }

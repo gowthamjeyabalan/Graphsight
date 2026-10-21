@@ -261,7 +261,12 @@ mod tests {
         assert_eq!(dl.nodes.iter().filter(|n| n.ring).count(), 2);
         s.change.only = true;
         build_draw_list(&s, &cam, size, &hi, &mut dl);
-        assert_eq!((dl.edges_hi.len(), dl.edges.len() + dl.edges_back.len(), dl.nodes.len()), (1, 0, 2));
+        // everything else is only dimmed, not removed
+        assert_eq!(dl.edges_hi.len(), 1);
+        assert_eq!(dl.edges.len(), 0, "no ordinary edge is left at full strength");
+        assert_eq!(dl.edges_back.len(), 4, "the other edges are still there, faded");
+        assert_eq!(dl.nodes.len(), 6);
+        assert_eq!(dl.nodes.iter().filter(|n| n.rgba[3] > 100).count(), 2, "only the two change nodes stand out");
     }
 
     #[test]

@@ -264,7 +264,9 @@ impl Cam3 {
         let (yaw, pitch) = match which {
             View3::Top => (0.0, MAX_PITCH),
             View3::Front => (0.0, 0.0),
-            View3::Side => (std::f32::consts::FRAC_PI_2, 0.0),
+            View3::Back => (std::f32::consts::PI, 0.0),
+            View3::Right => (std::f32::consts::FRAC_PI_2, 0.0),
+            View3::Left => (std::f32::consts::PI * 1.5, 0.0),
             View3::Iso => (0.45, 0.4),
         };
         self.yaw = yaw;
@@ -297,7 +299,9 @@ impl Cam3 {
 pub enum View3 {
     Top,
     Front,
-    Side,
+    Back,
+    Left,
+    Right,
     Iso,
 }
 
