@@ -72,6 +72,8 @@ pub struct App {
     pub last_title: String,
     pub show_help: bool,
     pub show_settings: bool,
+    /// The section shown in the settings window.
+    pub settings_section: usize,
     /// The graph fills the whole window (and the window is full screen); everything else is out of the way.
     pub maximized: bool,
     /// Name typed into the Window menu for “Save current”.
@@ -182,6 +184,7 @@ impl App {
             last_title: String::new(),
             show_help: false,
             show_settings: false,
+            settings_section: 0,
             maximized: false,
             ws_name: String::new(),
             applied_backdrop: None,

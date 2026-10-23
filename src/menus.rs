@@ -231,121 +231,69 @@ impl App {
         if !self.show_settings {
             return;
         }
-        let mut open = true;
+        let p = theme::pal_ctx(ctx);
+        let screen = ctx.content_rect();
+        let size = egui::vec2(840.0f32.min(screen.width() - 40.0), 600.0f32.min(screen.height() - 60.0));
+        let frame = egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(0)).corner_radius(12);
         let mut changed = false;
-        let mut reset = false;
-        let mut clear_recent = false;
-        let mut reset_panels = false;
-        egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
-            ui.set_width(540.0);
-            egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 120.0).max(240.0)).show(ui, |ui| {
-                ui.set_width(520.0);
-                section_label(ui, "LOOK");
-                setting_row(ui, "Mode", "Light, dark, or the same as Windows.", |ui| {
-                    let mut mode = self.settings.theme;
-                    if ui.segmented(&mut mode, &[(ThemeMode::System, "System"), (ThemeMode::Dark, "Dark"), (ThemeMode::Light, "Light")]) {
-                        self.settings.theme = mode;
-                        theme::set_mode(ctx, mode);
-                        changed = true;
-                    }
-                });
-                setting_row(ui, "Interface size", "Makes text, panels and controls larger or smaller.", |ui| {
-                    let mut pct = self.settings.ui_scale * 100.0;
-                    let mut moved = false;
-                    let mut done = false;
-                    ui.horizontal(|ui| {
-                        let r = ui.add(egui::DragValue::new(&mut pct).range(80.0..=160.0).suffix("%").fixed_decimals(1).speed(0.5));
-                        moved |= r.changed();
-                        done |= r.drag_stopped() || (r.changed() && !r.dragged());
-                        let r = ui.add(egui::Slider::new(&mut pct, 80.0..=160.0).show_value(false).step_by(5.0));
-                        moved |= r.changed();
-                        done |= r.drag_stopped() || (r.changed() && !r.dragged());
+        let modal = egui::Modal::new(egui::Id::unique("settings")).frame(frame).show(ctx, |ui| {
+            ui.set_min_size(size);
+            ui.set_max_size(size);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                // ── sections, on the left ──
+                egui::Frame::new().fill(p.bg).corner_radius(egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 }).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(176.0);
+                        ui.set_min_height(size.y - 24.0);
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 2.0);
+                        ui.label(theme::semibold("Settings").size(16.0).color(p.text));
+                        ui.add_space(12.0);
+                        for (k, name) in SETTINGS_SECTIONS.iter().enumerate() {
+                            let sel = self.settings_section == k;
+                            let text = egui::RichText::new(*name).size(13.0).color(if sel { p.text } else { p.text_secondary });
+                            if ui.add(egui::Button::selectable(sel, text).min_size(egui::vec2(176.0, 30.0))).clicked() {
+                                self.settings_section = k;
+                            }
+                        }
                     });
-                    if moved && done {
-                        self.settings.ui_scale = pct / 100.0;
-                        ctx.set_zoom_factor(self.settings.ui_scale);
-                        changed = true;
-                    }
                 });
-                changed |= ui.switch(&mut self.settings.graph_follows_theme, "Graph background follows the theme").on_hover_text("Also switch the graph background between dark and light.").changed();
-
-                ui.add_space(6.0);
-                section_label(ui, "TRANSLUCENCY");
-                setting_row(ui, "Window backdrop", "The material Windows 11 draws behind Grapht. Mica takes a soft tint from the desktop wallpaper, Mica Alt a stronger one, and Acrylic blurs whatever is behind the window.", |ui| {
-                    let mut b = self.settings.backdrop;
-                    if ui.segmented(&mut b, &[(Backdrop::None, "None"), (Backdrop::Mica, "Mica"), (Backdrop::MicaAlt, "Mica Alt"), (Backdrop::Acrylic, "Acrylic")]) {
-                        self.settings.backdrop = b;
-                        changed = true;
-                    }
-                });
-                let on = self.settings.backdrop != Backdrop::None;
-                if on && self.persist && !self.backdrop_on() {
-                    ui.label(theme::secondary("This version of Windows cannot draw a backdrop (it needs Windows 11, version 22H2 or later), so panels stay solid."));
-                }
-                let solid = "Needs a window backdrop.";
-                ui.add_enabled_ui(on, |ui| {
-                    changed |= setting_row_percent(ui, "Panels", if on { "How solid the menu bar, the panels and the space around them are; lower lets more of the backdrop through." } else { solid }, &mut self.settings.panel_opacity, 0.2);
-                    changed |= setting_row_percent(ui, "Graph", if on { "How solid the graph view is. At 100% it is a plain surface; lower lets the backdrop through behind your work." } else { solid }, &mut self.settings.board_opacity, 0.2);
-                });
-                changed |= setting_row_percent(ui, "Menus and floating windows", "Menus, popups and windows such as this one, over the graph and panels.", &mut self.settings.menu_opacity, 0.3);
-                if ui.button("Reset translucency").clicked() {
-                    let d = crate::config::Settings::default();
-                    self.settings.backdrop = d.backdrop;
-                    self.settings.panel_opacity = d.panel_opacity;
-                    self.settings.board_opacity = d.board_opacity;
-                    self.settings.menu_opacity = d.menu_opacity;
-                    changed = true;
-                }
-
-                ui.add_space(6.0);
-                section_label(ui, "GRAPH VIEW");
-                changed |= ui.switch(&mut self.settings.animate_view, "Animate view changes").changed();
-                changed |= ui.switch(&mut self.settings.show_toolbar, "Show the zoom / view buttons").changed();
-                changed |= ui.switch(&mut self.settings.show_tooltips, "Show details when hovering a node").changed();
-                changed |= ui.switch(&mut self.settings.show_frame_time, "Show frame time in the menu bar").changed();
-                setting_row(ui, "Filtered-out nodes", "What happens to nodes that do not pass the filter.", |ui| {
-                    let mut mode = self.s.look.filtered;
-                    if ui.segmented(&mut mode, &[(crate::model::FilteredMode::Dim, "Dim"), (crate::model::FilteredMode::Hide, "Hide")]) {
-                        self.s.look.filtered = mode;
-                    }
-                });
-
-                ui.add_space(6.0);
-                section_label(ui, "START-UP AND FILES");
-                changed |= ui.switch(&mut self.settings.restore_layout, "Reopen the last panel arrangement").changed();
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(!self.settings.recent.is_empty(), egui::Button::new("Clear recent sessions")).clicked() {
-                        clear_recent = true;
-                    }
-                    if ui.button("Reset panel layout").clicked() {
-                        reset_panels = true;
-                    }
-                });
-                ui.add_space(6.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Restore default settings").clicked() {
-                        reset = true;
-                    }
-                    if let Some(d) = crate::config::config_dir() {
-                        ui.label(theme::secondary(format!("Saved in {}", d.display())));
-                    }
+                // ── the section, on the right ──
+                ui.vertical(|ui| {
+                    ui.set_width(size.x - 200.0);
+                    ui.set_min_height(size.y);
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.label(theme::semibold(SETTINGS_SECTIONS[self.settings_section]).size(18.0).color(p.text));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(14.0);
+                            if ui.add(egui::Button::new(egui::RichText::new("×").size(17.0)).frame(false)).on_hover_text("Close (Esc)").clicked() {
+                                self.show_settings = false;
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    ui.separator();
+                    egui::ScrollArea::vertical().id_salt(("settings-body", self.settings_section)).auto_shrink([false, false]).show(ui, |ui| {
+                        egui::Frame::new().inner_margin(egui::Margin { left: 20, right: 22, top: 4, bottom: 16 }).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            changed |= match self.settings_section {
+                                0 => self.settings_appearance(ui),
+                                1 => self.settings_graph_view(ui),
+                                2 => self.settings_files(ui),
+                                3 => settings_shortcuts(ui),
+                                _ => settings_about(ui),
+                            };
+                        });
+                    });
                 });
             });
         });
-        if clear_recent {
-            self.settings.recent.clear();
-            changed = true;
-        }
-        if reset_panels {
-            self.dock = Some(dock::default_dock());
-        }
-        if reset {
-            let keep = std::mem::take(&mut self.settings.recent);
-            self.settings = crate::config::Settings { recent: keep, ..Default::default() };
-            theme::set_mode(ctx, self.settings.theme);
-            ctx.set_zoom_factor(self.settings.ui_scale);
-            changed = true;
+        // Esc or a click outside closes it
+        if modal.should_close() {
+            self.show_settings = false;
         }
         if changed {
             if self.persist {
@@ -354,8 +302,182 @@ impl App {
             self.save_settings();
             ctx.request_repaint();
         }
-        self.show_settings = open;
     }
+
+    fn settings_appearance(&mut self, ui: &mut Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        let mut changed = false;
+        settings_group(ui, "LOOK");
+        setting_row(ui, "Mode", "Light, dark, or the same as Windows.", |ui| {
+            ui.set_width(230.0);
+            let mut mode = self.settings.theme;
+            if ui.segmented(&mut mode, &[(ThemeMode::System, "System"), (ThemeMode::Dark, "Dark"), (ThemeMode::Light, "Light")]) {
+                self.settings.theme = mode;
+                theme::set_mode(&ctx, mode);
+                changed = true;
+            }
+        });
+        setting_row(ui, "Interface size", "Makes text, panels and controls larger or smaller. The graph's own zoom is separate.", |ui| {
+            let mut pct = self.settings.ui_scale * 100.0;
+            let mut moved = false;
+            let mut done = false;
+            ui.spacing_mut().slider_width = 170.0;
+            // right to left: the slider, then its value in a box before it
+            let r = ui.add(egui::Slider::new(&mut pct, 80.0..=160.0).show_value(false).step_by(5.0));
+            moved |= r.changed();
+            done |= r.drag_stopped() || (r.changed() && !r.dragged());
+            let r = ui.add(egui::DragValue::new(&mut pct).range(80.0..=160.0).suffix("%").fixed_decimals(1).speed(0.5));
+            moved |= r.changed();
+            done |= r.drag_stopped() || (r.changed() && !r.dragged());
+            if moved && done {
+                self.settings.ui_scale = pct / 100.0;
+                ctx.set_zoom_factor(self.settings.ui_scale);
+                changed = true;
+            }
+        });
+        setting_row(ui, "Graph background", "Switch the graph background between dark and light together with the interface.", |ui| {
+            changed |= ui.switch(&mut self.settings.graph_follows_theme, "").changed();
+        });
+
+        settings_group(ui, "TRANSLUCENCY");
+        setting_row(ui, "Window backdrop", "The material Windows 11 draws behind Grapht. Mica takes a soft tint from the desktop wallpaper, Mica Alt a stronger one, and Acrylic blurs whatever is behind the window.", |ui| {
+            ui.set_width(300.0);
+            let mut b = self.settings.backdrop;
+            if ui.segmented(&mut b, &[(Backdrop::None, "None"), (Backdrop::Mica, "Mica"), (Backdrop::MicaAlt, "Mica Alt"), (Backdrop::Acrylic, "Acrylic")]) {
+                self.settings.backdrop = b;
+                changed = true;
+            }
+        });
+        let on = self.settings.backdrop != Backdrop::None;
+        if on && self.persist && !self.backdrop_on() {
+            ui.label(theme::secondary("This version of Windows cannot draw a backdrop (it needs Windows 11, version 22H2 or later), so panels stay solid."));
+            ui.add_space(8.0);
+        }
+        let solid = "Needs a window backdrop.";
+        changed |= setting_row_percent(ui, "Panels", if on { "How solid the menu bar, the panels and the space around them are; lower lets more of the backdrop through." } else { solid }, &mut self.settings.panel_opacity, 0.2, on);
+        changed |= setting_row_percent(ui, "Graph", if on { "How solid the graph view is. At 100% it is a plain surface; lower lets the backdrop through behind your work." } else { solid }, &mut self.settings.board_opacity, 0.2, on);
+        changed |= setting_row_percent(ui, "Menus and floating windows", "Menus, popups and windows such as this one, over the graph and panels.", &mut self.settings.menu_opacity, 0.3, true);
+        let d = crate::config::Settings::default();
+        let custom = (self.settings.backdrop, self.settings.panel_opacity, self.settings.board_opacity, self.settings.menu_opacity) != (d.backdrop, d.panel_opacity, d.board_opacity, d.menu_opacity);
+        if ui.add_enabled(custom, egui::Button::new("Reset translucency")).clicked() {
+            self.settings.backdrop = d.backdrop;
+            self.settings.panel_opacity = d.panel_opacity;
+            self.settings.board_opacity = d.board_opacity;
+            self.settings.menu_opacity = d.menu_opacity;
+            changed = true;
+        }
+        changed
+    }
+
+    fn settings_graph_view(&mut self, ui: &mut Ui) -> bool {
+        let mut changed = false;
+        settings_group(ui, "VIEW");
+        setting_row(ui, "Animate view changes", "Camera moves glide for about 0.3 s. Scrolling or dragging stops them.", |ui| {
+            changed |= ui.switch(&mut self.settings.animate_view, "").changed();
+        });
+        setting_row(ui, "View buttons", "The zoom and view buttons floating over the graph.", |ui| {
+            changed |= ui.switch(&mut self.settings.show_toolbar, "").changed();
+        });
+        setting_row(ui, "Node details on hover", "Show a node's attributes when the pointer rests on it.", |ui| {
+            changed |= ui.switch(&mut self.settings.show_tooltips, "").changed();
+        });
+        setting_row(ui, "Frame time", "The ms / frame read-out at the right of the menu bar.", |ui| {
+            changed |= ui.switch(&mut self.settings.show_frame_time, "").changed();
+        });
+
+        settings_group(ui, "FILTER");
+        setting_row(ui, "Filtered-out nodes", "What happens to nodes that do not pass the filter: dimmed, or hidden altogether.", |ui| {
+            ui.set_width(160.0);
+            let mut mode = self.s.look.filtered;
+            if ui.segmented(&mut mode, &[(crate::model::FilteredMode::Dim, "Dim"), (crate::model::FilteredMode::Hide, "Hide")]) {
+                self.s.look.filtered = mode;
+            }
+        });
+        changed
+    }
+
+    fn settings_files(&mut self, ui: &mut Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        let mut changed = false;
+        settings_group(ui, "STARTING");
+        setting_row(ui, "Reopen the panel arrangement", "When Grapht opens, put the panels back the way they were. When off, it starts with the default layout.", |ui| {
+            changed |= ui.switch(&mut self.settings.restore_layout, "").changed();
+        });
+        setting_row(ui, "Panel layout", "Put every panel back in its usual place now.", |ui| {
+            if ui.button("Reset panel layout").clicked() {
+                self.dock = Some(dock::default_dock());
+            }
+        });
+
+        settings_group(ui, "RECENT SESSIONS");
+        let n = self.settings.recent.len();
+        let about = match n {
+            0 => "No sessions in File ▸ Open recent.".to_owned(),
+            1 => "1 session in File ▸ Open recent.".to_owned(),
+            n => format!("{n} sessions in File ▸ Open recent."),
+        };
+        setting_row(ui, "Recent sessions", &about, |ui| {
+            if ui.add_enabled(n > 0, egui::Button::new("Clear")).clicked() {
+                self.settings.recent.clear();
+                changed = true;
+            }
+        });
+
+        settings_group(ui, "SETTINGS");
+        let place = crate::config::config_dir().map_or("Settings are kept for this session only.".to_owned(), |d| format!("Saved in {}", d.display()));
+        setting_row(ui, "Restore defaults", &place, |ui| {
+            if ui.button("Restore default settings").clicked() {
+                let keep = std::mem::take(&mut self.settings.recent);
+                self.settings = crate::config::Settings { recent: keep, ..Default::default() };
+                theme::set_mode(&ctx, self.settings.theme);
+                ctx.set_zoom_factor(self.settings.ui_scale);
+                changed = true;
+            }
+        });
+        changed
+    }
+}
+
+const SETTINGS_SECTIONS: [&str; 5] = ["Appearance", "Graph view", "Start-up and files", "Keyboard shortcuts", "About"];
+
+fn settings_shortcuts(ui: &mut Ui) -> bool {
+    let p = theme::pal_ctx(ui.ctx());
+    let groups: [(&str, &[(&str, &str)]); 3] = [
+        ("FILES", &[("Ctrl+O", "Open session"), ("Ctrl+S", "Save session"), ("Ctrl+Shift+S", "Save session as"), ("Ctrl+,", "Settings")]),
+        ("VIEW", &[("F", "Zoom to fit"), ("S", "Zoom to the selection"), ("R", "Zoom to a region (drag a rectangle)"), ("Home", "Home view"), ("Alt+Left / Alt+Right", "Previous / next view"), ("F11", "Maximise the graph"), ("Space + drag", "Pan")]),
+        ("SELECTION", &[("Ctrl+A", "Select every visible node"), ("Ctrl / Shift + click", "Add to the selection"), ("Delete", "Hide the selected nodes"), ("Esc", "Clear the selection, then leave full screen"), ("Space", "Pause or resume the layout")]),
+    ];
+    for (title, keys) in groups {
+        settings_group(ui, title);
+        egui::Grid::new(("shortcuts", title)).num_columns(2).spacing(egui::vec2(24.0, 8.0)).min_col_width(170.0).show(ui, |ui| {
+            for (combo, what) in keys {
+                ui.label(egui::RichText::new(*combo).family(theme::medium_family()).size(13.0).color(p.text));
+                ui.label(egui::RichText::new(*what).size(13.0).color(p.text_secondary));
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+    }
+    false
+}
+
+fn settings_about(ui: &mut Ui) -> bool {
+    let p = theme::pal_ctx(ui.ctx());
+    ui.add_space(8.0);
+    ui.label(theme::semibold(format!("Grapht {}", env!("CARGO_PKG_VERSION"))).size(15.0).color(p.text));
+    ui.label(egui::RichText::new("A fast native desktop app for exploring graphs stored in CSV and JSON files.").size(13.0).color(p.text_secondary));
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("Written in Rust with egui. Released under the MIT licence.").size(12.5).color(p.text_secondary));
+    ui.add_space(6.0);
+    ui.hyperlink_to("github.com/gowthamjeyabalan/Grapht", "https://github.com/gowthamjeyabalan/Grapht");
+    false
+}
+
+/// A titled group of settings, with air above it.
+fn settings_group(ui: &mut Ui, title: &str) {
+    ui.add_space(8.0);
+    theme::heading(ui, title);
+    ui.add_space(8.0);
 }
 
 // ───────────────────────── small widgets for the menus and the settings window ─────────────────────────
@@ -387,34 +509,34 @@ fn check_row(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
     resp
 }
 
-/// A setting with its name and a short explanation on the left and its control on the right.
+/// A setting: its name and a line about it on the left, the control on the right (laid out right to left).
 fn setting_row(ui: &mut Ui, title: &str, desc: &str, control: impl FnOnce(&mut Ui)) {
+    let p = theme::pal_ctx(ui.ctx());
     ui.horizontal(|ui| {
-        let right = 230.0;
-        let left = (ui.available_width() - right - 12.0).max(140.0);
-        ui.allocate_ui_with_layout(egui::vec2(left, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
-            ui.set_width(left);
-            ui.label(egui::RichText::new(title).family(theme::medium_family()));
-            ui.label(egui::RichText::new(desc).size(11.5).weak());
+        let w = ui.available_width();
+        ui.vertical(|ui| {
+            ui.set_width((w * 0.5).max(180.0));
+            ui.label(egui::RichText::new(title).size(13.5).color(p.text));
+            if !desc.is_empty() {
+                ui.label(egui::RichText::new(desc).size(12.0).color(p.text_secondary));
+            }
         });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.set_width(right);
-            control(ui);
-        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| control(ui));
     });
-    ui.add_space(4.0);
+    ui.add_space(12.0);
 }
 
 /// A 0–100% setting: its value in a box next to a slider. Returns true when it changed.
-fn setting_row_percent(ui: &mut Ui, title: &str, desc: &str, value: &mut f32, min: f32) -> bool {
+fn setting_row_percent(ui: &mut Ui, title: &str, desc: &str, value: &mut f32, min: f32, enabled: bool) -> bool {
     let mut changed = false;
     setting_row(ui, title, desc, |ui| {
-        let mut pct = *value * 100.0;
-        ui.horizontal(|ui| {
-            changed |= ui.add(egui::DragValue::new(&mut pct).range(min * 100.0..=100.0).suffix("%").fixed_decimals(1).speed(0.5)).changed();
+        ui.add_enabled_ui(enabled, |ui| {
+            let mut pct = *value * 100.0;
+            ui.spacing_mut().slider_width = 170.0;
             changed |= ui.add(egui::Slider::new(&mut pct, min * 100.0..=100.0).show_value(false)).changed();
+            changed |= ui.add(egui::DragValue::new(&mut pct).range(min * 100.0..=100.0).suffix("%").fixed_decimals(1).speed(0.5)).changed();
+            *value = (pct / 100.0).clamp(min, 1.0);
         });
-        *value = (pct / 100.0).clamp(min, 1.0);
     });
     changed
 }

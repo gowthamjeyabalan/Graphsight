@@ -94,7 +94,6 @@ fn pal_of(ui: &Ui) -> &'static Pal {
 }
 
 /// Palette of the appearance currently shown by the context (without translucency).
-#[allow(dead_code)] // used by the tests
 pub fn pal_ctx(ctx: &egui::Context) -> &'static Pal {
     pal(ctx.theme() == egui::Theme::Dark)
 }

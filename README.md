@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-A fast native desktop app (Rust, egui + wgpu) for exploring graphs stored in **CSV** and **JSON** files.
+A fast native desktop app (Rust, egui + OpenGL) for exploring graphs stored in **CSV** and **JSON** files.
 Load an edges file and, optionally, a nodes file with attributes; colour, size, filter and sort the graph by
 those attributes; switch between layouts; export PNG / SVG.
 
