@@ -1,7 +1,7 @@
 //! Per-user settings: where they live, the recent-sessions list and the saved panel layout.
 
 use crate::dock::Tab;
-use crate::theme::ThemeMode;
+use crate::theme::{Backdrop, ThemeMode};
 use egui_dock::DockState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -49,6 +49,14 @@ pub struct Settings {
     pub show_tooltips: bool,
     /// The “ms / frame” read-out in the menu bar.
     pub show_frame_time: bool,
+    /// The material Windows draws behind the window.
+    pub backdrop: Backdrop,
+    /// How solid the menu bar and the panels are (1 = opaque).
+    pub panel_opacity: f32,
+    /// How solid the graph view is.
+    pub board_opacity: f32,
+    /// How solid menus, popups and floating windows are.
+    pub menu_opacity: f32,
 }
 
 impl Default for Settings {
@@ -63,11 +71,23 @@ impl Default for Settings {
             show_toolbar: true,
             show_tooltips: true,
             show_frame_time: true,
+            backdrop: Backdrop::Acrylic,
+            panel_opacity: 0.4,
+            board_opacity: 1.0,
+            menu_opacity: 0.9,
         }
     }
 }
 
 impl Settings {
+    /// The translucency these settings ask for, with `backdrop_on` saying whether Windows is drawing the material.
+    /// Without it there is nothing behind the panels and the graph, so they stay solid; menus and floating windows still
+    /// let the graph and panels show through.
+    pub fn translucency(&self, backdrop_on: bool) -> crate::theme::Translucency {
+        let see = |v: f32| if backdrop_on && self.backdrop != Backdrop::None { v.clamp(0.2, 1.0) } else { 1.0 };
+        crate::theme::Translucency { panels: see(self.panel_opacity), board: see(self.board_opacity), menus: self.menu_opacity.clamp(0.3, 1.0) }
+    }
+
     pub fn load() -> Settings {
         config_dir()
             .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())

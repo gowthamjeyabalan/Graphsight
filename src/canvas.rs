@@ -203,7 +203,9 @@ impl App {
         self.canvas_rect = rect;
         let painter = ui.painter_at(rect);
         let bg = self.s.look.background();
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
+        // the graph may be see-through (Settings ▸ Translucency ▸ Graph)
+        let board = crate::theme::translucency(ui.ctx()).board;
+        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], (board * 255.0).round() as u8));
 
         if self.s.fit_requested {
             self.auto_fit = true;
@@ -211,6 +213,7 @@ impl App {
         }
         if self.s.g.n() == 0 {
             self.empty_state(ui, rect, &painter);
+            self.maximize_button(ui, rect);
             return;
         }
 
@@ -261,7 +264,7 @@ impl App {
         self.paint_overlays(&painter, rect);
         self.paint_region(&painter, rect);
         self.prof.add(3, t_p);
-        if self.settings.show_toolbar {
+        if self.settings.show_toolbar || self.maximized {
             if let Some(tool) = self.toolbar(ui, rect) {
                 self.run_tool(tool);
             }
@@ -269,6 +272,8 @@ impl App {
             self.view.buttons.clear();
             self.view.toolbar_rect = None;
         }
+
+        self.maximize_button(ui, rect);
 
         // tooltip
         if let (Some(h), None, None, true) = (self.hover, self.drag_node, self.box_start, self.settings.show_tooltips && self.section_drag.is_none()) {
@@ -289,6 +294,50 @@ impl App {
                     }
                 });
             });
+        }
+    }
+
+    /// The button in the top-right corner of the graph: full screen, or (when the graph is full screen) the way back.
+    fn maximize_button(&mut self, ui: &mut Ui, canvas: Rect) {
+        let on = self.maximized;
+        let size = if on { Vec2::new(154.0, 30.0) } else { Vec2::splat(30.0) };
+        let r = Rect::from_min_size(Pos2::new(canvas.right() - 12.0 - size.x, canvas.top() + 10.0), size);
+        let id = ui.make_persistent_id("maximize_graph");
+        let resp = ui.interact(r, id, Sense::click());
+        let tip = if on { "Leave full screen  (Esc or F11)" } else { "Maximise the graph: full screen with its view controls  (F11)" };
+        let resp = resp.on_hover_text(tip);
+        let v = ui.visuals();
+        let fill = if resp.is_pointer_button_down_on() {
+            v.widgets.active.bg_fill
+        } else if resp.hovered() {
+            v.widgets.hovered.bg_fill
+        } else {
+            crate::theme::faded(v.window_fill(), 0.92)
+        };
+        let ink = if resp.hovered() { v.widgets.hovered.fg_stroke.color } else { v.text_color() };
+        let line = v.widgets.noninteractive.bg_stroke.color;
+        let p = ui.painter();
+        p.rect_filled(r, 8.0, fill);
+        p.rect_stroke(r, 8.0, Stroke::new(1.0, line), StrokeKind::Inside);
+        let st = Stroke::new(1.6, ink);
+        if on {
+            // a cross, and what it does
+            let c = Pos2::new(r.left() + 17.0, r.center().y);
+            p.line_segment([c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)], st);
+            p.line_segment([c + Vec2::new(-4.5, 4.5), c + Vec2::new(4.5, -4.5)], st);
+            p.text(Pos2::new(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, "Leave full screen", FontId::proportional(12.5), ink);
+        } else {
+            // four corner arrows pointing outwards
+            let c = r.center();
+            for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let corner = c + Vec2::new(sx * 6.5, sy * 6.5);
+                p.line_segment([corner, corner + Vec2::new(-sx * 4.0, 0.0)], st);
+                p.line_segment([corner, corner + Vec2::new(0.0, -sy * 4.0)], st);
+            }
+        }
+        if resp.clicked() {
+            let ctx = ui.ctx().clone();
+            self.set_maximized(&ctx, !on);
         }
     }
 
@@ -492,8 +541,14 @@ impl App {
                 ui.ctx().request_repaint();
             } else if self.box_start.is_none() && self.s.is_3d() {
                 let d = resp.drag_delta();
-                self.s.cam3.yaw -= d.x * 0.008;
-                self.s.cam3.pitch += d.y * 0.008;
+                // with something selected the view turns around the selection, otherwise around the view's own centre
+                match self.s.selection_pivot3() {
+                    Some(pivot) => self.s.cam3.orbit_about(pivot, -d.x * 0.008, d.y * 0.008, size),
+                    None => {
+                        self.s.cam3.yaw -= d.x * 0.008;
+                        self.s.cam3.pitch += d.y * 0.008;
+                    }
+                }
                 self.s.cam3.clamp();
                 ui.ctx().request_repaint();
             } else if self.box_start.is_none() {
@@ -543,8 +598,17 @@ impl App {
                     }
                 }
                 None => {
-                    if !(mods.shift || mods.ctrl || mods.command) {
-                        self.s.clear_selection();
+                    let extend = mods.shift || mods.ctrl || mods.command;
+                    // no node under the pointer: an edge may be
+                    let edge = resp.interact_pointer_pos().and_then(|p| {
+                        let p = p - rect.min;
+                        pick_edge(&self.s, &self.cam, size, Vec2::new(p.x, p.y))
+                    });
+                    match edge {
+                        Some(e) if extend => self.s.toggle_edge_selected(e),
+                        Some(e) => self.s.select_only_edge(e),
+                        None if !extend => self.s.clear_selection(),
+                        None => {}
                     }
                 }
             }
@@ -731,6 +795,23 @@ impl App {
                 for m in sink.finish() {
                     painter.add(Shape::mesh(m));
                 }
+            }
+        }
+
+        // selected edges: a thick accent line over the ordinary edges, under the nodes
+        if !self.s.sel_edges.is_empty() {
+            let proj = self.s.projector(&self.cam, self.canvas_size);
+            let accent = Color32::from_rgb(10, 132, 255);
+            let w = (width * 2.5).max(3.0);
+            let mut sink = MeshSink::new(TextureId::default());
+            for &e in &self.s.sel_edges {
+                let Some(&(a, b)) = self.s.g.edges.get(e as usize) else { continue };
+                if let (Some((pa, _, _)), Some((pb, _, _))) = (proj.at(&self.s, a as usize), proj.at(&self.s, b as usize)) {
+                    sink.line(Pos2::new(pa.x, pa.y) + off, Pos2::new(pb.x, pb.y) + off, w, accent, true);
+                }
+            }
+            for m in sink.finish() {
+                painter.add(Shape::mesh(m));
             }
         }
 
@@ -1039,6 +1120,9 @@ impl App {
         if self.s.sel_count > 0 {
             txt += &format!(" · {} selected", self.s.sel_count);
         }
+        if !self.s.sel_edges.is_empty() {
+            txt += &format!(" · {} edge{} selected", self.s.sel_edges.len(), if self.s.sel_edges.len() == 1 { "" } else { "s" });
+        }
         if self.s.section_active() {
             txt += if self.s.section.outside == crate::section::Outside::Hide { " · section box (outside hidden)" } else { " · section box" };
         }
@@ -1048,7 +1132,7 @@ impl App {
             txt += " · layout paused";
         }
         if self.s.is_3d() {
-            txt += " · drag to orbit · right-drag to pan · scroll to zoom";
+            txt += if self.s.has_selection() { " · drag to orbit around the selection · right-drag to pan · scroll to zoom" } else { " · drag to orbit · right-drag to pan · scroll to zoom" };
         }
         painter.text(rect.left_top() + Vec2::new(10.0, 10.0), Align2::LEFT_TOP, txt, FontId::proportional(12.0), tc);
         if self.s.is_3d() {

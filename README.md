@@ -95,6 +95,22 @@ to rest). In 3D a second row adds the drag mode (orbit / pan / zoom), Top / Fron
 perspective / orthographic switch. Camera moves glide (about 0.3 s; **View ▸ Animate view changes** turns that off) and
 stop as soon as you scroll or drag. The view history is not saved in sessions; the camera and projection are.
 
+**Selecting edges and orbiting around the selection** — clicking an edge selects it (Ctrl/Shift+click adds to the
+selection, so nodes and edges can be selected together; `Esc` clears). In the 3D view, dragging to orbit then turns the
+camera around the middle of whatever is selected (a selected edge counts with both of its ends) and keeps the selection
+where it is on screen; with nothing selected it turns around the centre of the view as before.
+
+**Full-screen graph** — the button in the top-right corner of the graph (or **View ▸ Maximise graph**, `F11`) makes the
+graph fill the whole screen together with its view controls. The *Leave full screen* button, `F11` or `Esc` (after a
+selection has been cleared) bring the panels back.
+
+**Nodes table columns** — right-click a column header to hide it, Ctrl+click headers to pick several, or use the
+*Columns* button above the table to tick columns on and off, hide the picked ones and *Show all* again.
+
+**Appearance** — *Settings* opens the settings window directly. Mode (System / Dark / Light), interface size, and a
+*Translucency* section: a Windows 11 window backdrop (None, Mica, Mica Alt, Acrylic) and how solid the panels, the graph
+and the menus / floating windows are. The backdrop needs Windows 11; with *None* the interface stays solid.
+
 **Connection query** — the *Query* tab answers “how many X are connected to Y?”. Pick the first group (an attribute
 and *is / is not / < / > / contains / starts with / is empty …*, or any node, or the node id), pick the second group,
 and choose whether a connection has to run *either way*, *first → second* or *second → first* (undirected edges count
@@ -139,6 +155,7 @@ grapht --help
 | `query.rs` | the connection query: group conditions, direction, counts, cross-tab |
 | `view.rs` | view tools: zoom to fit / selection / region, animated camera moves, view history |
 | `toolbar.rs` | the floating view toolbar and its painter-drawn icons |
+| `backdrop.rs` | the Windows 11 window material (Mica / Acrylic) behind the see-through window |
 | `boxes.rs` | bounding boxes: the six min/max columns, which nodes get a box, box geometry |
 | `subgraph.rs` | attribute sub-graphs, N-hop neighbours, joining separate pieces by shortest paths |
 | `layout.rs` | static layouts and the Barnes–Hut force simulation |

@@ -93,9 +93,84 @@ fn pal_of(ui: &Ui) -> &'static Pal {
     pal(ui.visuals().dark_mode)
 }
 
-/// Palette of the appearance currently shown by the context.
+/// Palette of the appearance currently shown by the context (without translucency).
+#[allow(dead_code)] // used by the tests
 pub fn pal_ctx(ctx: &egui::Context) -> &'static Pal {
     pal(ctx.theme() == egui::Theme::Dark)
+}
+
+// ── translucency ──
+
+/// The material Windows 11 draws behind the window (shows through wherever the interface is see-through).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Backdrop {
+    None,
+    Mica,
+    MicaAlt,
+    Acrylic,
+}
+
+/// How solid each kind of surface is: 1.0 is a plain opaque surface, lower lets the backdrop through.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Translucency {
+    /// The menu bar, the panels and the space around them.
+    pub panels: f32,
+    /// The graph view.
+    pub board: f32,
+    /// Menus, popups and floating windows.
+    pub menus: f32,
+}
+
+impl Translucency {
+    pub const OPAQUE: Translucency = Translucency { panels: 1.0, board: 1.0, menus: 1.0 };
+
+    /// Does the backdrop show through anywhere? (Then the window itself has to be cleared to transparent.)
+    pub fn any(&self) -> bool {
+        self.panels < 0.999 || self.board < 0.999
+    }
+}
+
+#[allow(deprecated)]
+fn tl_id() -> egui::Id {
+    egui::Id::new("grapht-translucency")
+}
+
+/// The translucency the interface is drawn with right now.
+pub fn translucency(ctx: &egui::Context) -> Translucency {
+    ctx.data(|d| d.get_temp::<[f32; 3]>(tl_id())).map_or(Translucency::OPAQUE, |t| Translucency { panels: t[0], board: t[1], menus: t[2] })
+}
+
+/// The same colour, with its opacity multiplied by `k` (0 to 1).
+pub fn faded(c: Color32, k: f32) -> Color32 {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(r, g, b, (a as f32 * k.clamp(0.0, 1.0)).round() as u8)
+}
+
+/// The palette with the translucency applied to the surfaces it describes.
+fn pal_faded(dark: bool, t: Translucency) -> Pal {
+    let mut p = *pal(dark);
+    p.bg = faded(p.bg, t.panels);
+    // a panel's body sits over the space around it: lighter, so the two together are about as see-through as the setting
+    p.bg_elevated = faded(p.bg_elevated, if t.panels >= 0.999 { 1.0 } else { t.panels * 0.6 });
+    p.window_fill = faded(p.window_fill, t.menus);
+    p
+}
+
+/// Palette of the current appearance, translucency included (what the panels, the menu bar and the tabs are filled with).
+pub fn pal_tl(ctx: &egui::Context) -> Pal {
+    pal_faded(ctx.theme() == egui::Theme::Dark, translucency(ctx))
+}
+
+/// Make the interface see-through by these amounts. Restyles both appearances; cheap enough to call when a slider moves.
+pub fn set_translucency(ctx: &egui::Context, t: Translucency) {
+    if translucency(ctx) == t {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(tl_id(), [t.panels, t.board, t.menus]));
+    for (theme, dark) in [(egui::Theme::Dark, true), (egui::Theme::Light, false)] {
+        ctx.style_mut_of(theme, |style| build_style(style, &pal_faded(dark, t), dark));
+    }
+    ctx.request_repaint();
 }
 
 pub fn semibold_family() -> FontFamily {
@@ -342,7 +417,7 @@ impl UiExt for Ui {
 
 /// Style for the docking area (tab bars and separators), matching the rest of the theme.
 pub fn dock_style(ctx: &egui::Context) -> egui_dock::Style {
-    let p = pal_ctx(ctx);
+    let p = &pal_tl(ctx);
     let mut s = egui_dock::Style::from_egui(&ctx.global_style());
     s.dock_area_padding = Some(Margin::same(6));
     s.main_surface_border_stroke = Stroke::NONE;

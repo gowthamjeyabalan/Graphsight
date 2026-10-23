@@ -6,6 +6,51 @@ use egui::{Align, Color32, Layout, RichText, Sense, Ui};
 use egui_extras::{Column as TCol, TableBuilder};
 
 impl App {
+    /// Take an attribute column out of the table (it can be brought back from the Columns menu).
+    pub fn hide_column(&mut self, name: &str) {
+        if name != "id" && !self.table.hidden.iter().any(|h| h == name) {
+            self.table.hidden.push(name.to_string());
+        }
+        self.table.picked.retain(|p| p != name);
+    }
+
+    /// “Columns” button of the table: tick the attribute columns to show, hide the picked ones, show everything again.
+    fn columns_menu(&mut self, ui: &mut Ui) {
+        let n_hidden = self.table.hidden.len();
+        let label = if n_hidden > 0 { format!("Columns ({n_hidden} hidden) ▾") } else { "Columns ▾".to_string() };
+        let names: Vec<String> = self.s.g.node_cols.iter().map(|c| c.name.clone()).collect();
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(190.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(n_hidden > 0, egui::Button::new("Show all")).clicked() {
+                    self.table.hidden.clear();
+                }
+                let picked = self.table.picked.len();
+                if ui.add_enabled(picked > 0, egui::Button::new(format!("Hide picked ({picked})"))).clicked() {
+                    for p in self.table.picked.clone() {
+                        self.hide_column(&p);
+                    }
+                    self.table.picked.clear();
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for name in &names {
+                    let mut on = !self.table.hidden.contains(name);
+                    if ui.checkbox(&mut on, name).changed() {
+                        if on {
+                            self.table.hidden.retain(|h| h != name);
+                        } else {
+                            self.hide_column(name);
+                        }
+                    }
+                }
+            });
+            ui.separator();
+            ui.weak("Ctrl+click column headers to pick several, right-click a header to hide it.");
+        });
+    }
+
     fn rebuild_table_order(&mut self) {
         let g = &self.s.g;
         let mut order: Vec<u32> = (0..g.n() as u32).filter(|&i| self.s.vis[i as usize]).collect();
@@ -54,6 +99,7 @@ impl App {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                self.columns_menu(ui);
                 if ui.small_button("Select all listed").clicked() {
                     self.s.clear_selection();
                     for &i in &self.table.order {
@@ -66,13 +112,23 @@ impl App {
             return;
         }
 
-        let col_names: Vec<String> = self.s.g.node_cols.iter().map(|c| c.name.clone()).collect();
-        let n_cols = 1 + col_names.len();
+        // forget hidden / picked columns that no longer exist (another file was loaded)
+        {
+            let have: Vec<&str> = self.s.g.node_cols.iter().map(|c| c.name.as_str()).collect();
+            self.table.hidden.retain(|h| have.contains(&h.as_str()));
+            self.table.picked.retain(|h| have.contains(&h.as_str()));
+        }
+        // the columns that are shown: indices into the graph's attribute columns
+        let shown_cols: Vec<usize> = (0..self.s.g.node_cols.len()).filter(|&k| !self.table.hidden.contains(&self.s.g.node_cols[k].name)).collect();
+        let n_cols = 1 + shown_cols.len();
         let mut clicked_header: Option<String> = None;
+        let mut pick_header: Option<String> = None;
+        let mut hide_now: Vec<String> = vec![];
         let mut clicked_row: Option<(usize, bool)> = None;
         let mut dbl_row: Option<usize> = None;
         let order = std::mem::take(&mut self.table.order);
         let sort = self.table.sort.clone();
+        let picked = self.table.picked.clone();
 
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             let mut tb = TableBuilder::new(ui).striped(true).resizable(true).sense(Sense::click()).cell_layout(Layout::left_to_right(Align::Center)).vscroll(true);
@@ -82,7 +138,7 @@ impl App {
             }
             tb.header(20.0, |mut header| {
                 let mut names = vec!["id".to_string()];
-                names.extend(col_names.iter().cloned());
+                names.extend(shown_cols.iter().map(|&k| self.s.g.node_cols[k].name.clone()));
                 for name in names {
                     header.col(|ui| {
                         let arrow = match &sort {
@@ -91,9 +147,31 @@ impl App {
                             }
                             _ => "",
                         };
-                        let shown = if name.starts_with('_') { format!("{name}{arrow}") } else { format!("{name}{arrow}") };
-                        if ui.add(egui::Label::new(RichText::new(shown).strong()).sense(Sense::click())).clicked() {
-                            clicked_header = Some(name.clone());
+                        let is_picked = picked.contains(&name);
+                        let mut text = RichText::new(format!("{name}{arrow}")).strong();
+                        if is_picked {
+                            text = text.color(ui.visuals().selection.stroke.color).underline();
+                        }
+                        let resp = ui.add(egui::Label::new(text).sense(Sense::click()));
+                        if resp.clicked() {
+                            if name != "id" && ui.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.shift) {
+                                pick_header = Some(name.clone());
+                            } else {
+                                clicked_header = Some(name.clone());
+                            }
+                        }
+                        if name != "id" {
+                            resp.context_menu(|ui| {
+                                if ui.button(format!("Hide “{name}”")).clicked() {
+                                    hide_now.push(name.clone());
+                                    ui.close();
+                                }
+                                if is_picked && picked.len() > 1 && ui.button(format!("Hide the {} picked columns", picked.len())).clicked() {
+                                    hide_now.extend(picked.iter().cloned());
+                                    ui.close();
+                                }
+                                ui.weak("Ctrl+click headers to pick several columns.");
+                            });
                         }
                     });
                 }
@@ -108,7 +186,8 @@ impl App {
                         ui.painter().circle_filled(r.center(), 4.5, Color32::from_rgb(c[0], c[1], c[2]));
                         ui.label(&self.s.g.ids[i]);
                     });
-                    for c in &self.s.g.node_cols {
+                    for &k in &shown_cols {
+                        let c = &self.s.g.node_cols[k];
                         row.col(|ui| match c.label_at(i) {
                             Some(l) => {
                                 ui.label(l);
@@ -130,6 +209,17 @@ impl App {
         });
         self.table.order = order;
 
+        if let Some(name) = pick_header {
+            match self.table.picked.iter().position(|p| *p == name) {
+                Some(k) => {
+                    self.table.picked.remove(k);
+                }
+                None => self.table.picked.push(name),
+            }
+        }
+        for name in hide_now {
+            self.hide_column(&name);
+        }
         if let Some(name) = clicked_header {
             self.table.sort = match &self.table.sort {
                 Some((c, true)) if *c == name => Some((name, false)),

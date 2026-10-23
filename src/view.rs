@@ -304,9 +304,10 @@ impl ViewCtl {
 
 // ───────────────────────────── targets ─────────────────────────────
 
-/// Selected nodes that are on screen (not filtered out).
+/// The nodes the selection stands for that are on screen (not filtered out): the selected nodes, and the two ends
+/// of every selected edge.
 pub fn selected_visible(s: &Session) -> Vec<usize> {
-    (0..s.g.n()).filter(|&i| s.sel[i] && s.vis[i]).collect()
+    if s.sel_edges.is_empty() { (0..s.g.n()).filter(|&i| s.sel[i] && s.vis[i]).collect() } else { s.selection_nodes() }
 }
 
 fn clamp_zoom(z: f32) -> f32 {
@@ -873,6 +874,56 @@ mod tests {
         }
         assert_eq!(h.len(), 2, "[0, 77]: the forward views are gone");
         assert!(!h.can_forward());
+    }
+
+    #[test]
+    fn orbiting_with_a_selection_keeps_the_selection_where_it_is_on_screen() {
+        let mut s = session_3d();
+        s.cam3 = orbit(fit_target(&s, SIZE));
+        s.select_nodes([0usize, 5, 30, 35]);
+        let pivot = s.selection_pivot3().expect("something is selected");
+        let before = s.cam3.orbit(SIZE).project(pivot).unwrap().0;
+        let yaw0 = s.cam3.yaw;
+        for _ in 0..40 {
+            s.cam3.orbit_about(pivot, -0.05, 0.02, SIZE);
+        }
+        let after = s.cam3.orbit(SIZE).project(pivot).unwrap().0;
+        assert!((before - after).length() < 0.05, "pivot stayed put: {before:?} -> {after:?}");
+        assert!((s.cam3.yaw - yaw0).abs() > 0.1, "and the view did turn");
+        // the plain orbit is the same thing with the pivot at the target
+        let mut a = s.cam3;
+        let mut b = s.cam3;
+        a.orbit_about(a.target, 0.3, 0.1, SIZE);
+        b.yaw += 0.3;
+        b.pitch += 0.1;
+        b.clamp();
+        assert!((0..3).all(|k| (a.target[k] - b.target[k]).abs() < 1e-3) && (a.yaw - b.yaw).abs() < 1e-5 && (a.pitch - b.pitch).abs() < 1e-5);
+    }
+
+    #[test]
+    fn selected_edges_count_with_both_ends_and_edges_can_be_picked() {
+        let mut s = session_3d();
+        s.cam3 = orbit(fit_target(&s, SIZE));
+        assert!(s.selection_pivot3().is_none());
+        // edge 0 joins n0 and n1
+        s.select_only_edge(0);
+        assert!(s.has_selection() && s.sel_count == 0);
+        let (a, b) = s.g.edges[0];
+        let mid = [0, 1, 2].map(|k| (s.pos3[a as usize][k] + s.pos3[b as usize][k]) * 0.5);
+        let pv = s.selection_pivot3().unwrap();
+        assert!((0..3).all(|k| (pv[k] - mid[k]).abs() < 1e-4), "{pv:?} vs {mid:?}");
+        // nodes and edges together: the pivot is the middle of everything chosen
+        s.set_selected(35, true);
+        let pv2 = s.selection_pivot3().unwrap();
+        assert!(pv2 != pv);
+        assert_eq!(selected_visible(&s).len(), 3);
+        // clicking on the middle of the edge finds it, clicking far away does not
+        let o = s.cam3.orbit(SIZE);
+        let mid_px = o.project(mid).unwrap().0;
+        assert_eq!(crate::model::pick_edge(&s, &ViewCam::default(), SIZE, mid_px), Some(0));
+        assert_eq!(crate::model::pick_edge(&s, &ViewCam::default(), SIZE, mid_px + Vec2::new(0.0, 60.0)), None);
+        s.clear_selection();
+        assert!(!s.has_selection());
     }
 
     #[test]

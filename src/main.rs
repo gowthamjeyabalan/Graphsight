@@ -1,6 +1,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod app;
+mod backdrop;
 mod boxes;
 mod canvas;
 mod changes;
@@ -301,7 +302,11 @@ fn main() -> Result<()> {
             .with_icon(window_icon())
             .with_inner_size([1480.0, 920.0])
             .with_min_inner_size([920.0, 580.0])
+            // see-through, so that the Windows 11 backdrop (Settings ▸ Translucency) can show behind the interface
+            .with_transparent(true)
             .with_drag_and_drop(true),
+        // OpenGL, as in Overlay: wgpu's swap chain blends the see-through window wrongly (washed-out panels)
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native("Grapht", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args))))).map_err(|e| anyhow::anyhow!("{e}"))

@@ -32,6 +32,10 @@ pub struct TableState {
     pub sort: Option<(String, bool)>, // column name ("id" for the id column), ascending?
     pub order: Vec<u32>,
     pub dirty: bool,
+    /// Attribute columns taken out of the table (by name). The id column always stays.
+    pub hidden: Vec<String>,
+    /// Columns picked with Ctrl+click on their header, waiting to be hidden together.
+    pub picked: Vec<String>,
 }
 
 pub struct App {
@@ -68,6 +72,13 @@ pub struct App {
     pub last_title: String,
     pub show_help: bool,
     pub show_settings: bool,
+    /// The graph fills the whole window (and the window is full screen); everything else is out of the way.
+    pub maximized: bool,
+    /// Name typed into the Window menu for “Save current”.
+    pub ws_name: String,
+    /// The window material last handed to Windows, whether the interface was dark, and whether Windows took it (so it
+    /// is only asked again on a change).
+    pub applied_backdrop: Option<(crate::theme::Backdrop, bool, bool)>,
     /// The workspace templates the user saved (Window ▸ Workspaces).
     pub workspaces: Vec<crate::config::Workspace>,
     /// The "save workspace" dialog: the name being typed.
@@ -115,6 +126,7 @@ impl App {
         app.settings = crate::config::Settings::load();
         app.workspaces = crate::config::load_workspaces();
         crate::theme::set_mode(&cc.egui_ctx, app.settings.theme);
+        crate::theme::set_translucency(&cc.egui_ctx, app.translucency());
         cc.egui_ctx.set_zoom_factor(app.settings.ui_scale.clamp(0.6, 2.0));
         // the graph background follows the interface (a session that is opened later keeps its own choice)
         app.applied_dark = cc.egui_ctx.theme() == egui::Theme::Dark;
@@ -170,6 +182,9 @@ impl App {
             last_title: String::new(),
             show_help: false,
             show_settings: false,
+            maximized: false,
+            ws_name: String::new(),
+            applied_backdrop: None,
             workspaces: vec![],
             ws_dialog: None,
             applied_dark: true,
@@ -423,12 +438,28 @@ impl App {
         if do_settings {
             self.show_settings = !self.show_settings;
         }
+        // full screen graph: F11 toggles, Esc leaves (a selection or the zoom-region tool takes the first Esc)
+        let (f11, esc) = ctx.input(|i| (i.key_pressed(Key::F11), i.key_pressed(Key::Escape)));
+        if f11 {
+            self.set_maximized(ctx, !self.maximized);
+        } else if esc && self.maximized && !self.s.has_selection() && !self.view.region_on && !ctx.egui_wants_keyboard_input() {
+            self.set_maximized(ctx, false);
+        }
         if do_save_as {
             self.report(ctx, |a| a.save_project_as(), "Session saved");
         } else if do_save {
             self.report(ctx, |a| a.save_project(), "Session saved");
         } else if do_open {
             self.open_project_dialog();
+        }
+    }
+
+    /// Show the graph alone, filling the screen (or bring the panels back).
+    pub fn set_maximized(&mut self, ctx: &Context, on: bool) {
+        if self.maximized != on {
+            self.maximized = on;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+            ctx.request_repaint();
         }
     }
 
@@ -534,6 +565,10 @@ impl App {
                 if ui.checkbox(&mut self.settings.animate_view, "Animate view changes").changed() {
                     self.save_settings();
                 }
+                if ui.button("Maximise graph   (F11)").on_hover_text("The graph fills the whole screen, with its view controls. Esc or the close button brings the panels back.").clicked() {
+                    ui.close();
+                    self.set_maximized(&ctx, true);
+                }
                 if ui.button("Fit graph to window   (F)").clicked() {
                     ui.close();
                     self.run_tool(crate::view::Tool::Fit);
@@ -552,7 +587,7 @@ impl App {
                 }
             });
             self.window_menu(ui);
-            self.settings_menu(ui);
+            self.settings_button(ui);
             ui.menu_button("Help", |ui| {
                 if ui.button("Controls and filter syntax").clicked() {
                     ui.close();
@@ -727,27 +762,69 @@ pub enum PendKindHint {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.sync_backdrop(ui.ctx(), frame);
         self.ui_inner(ui);
     }
 
-    fn on_exit(&mut self) {
+    /// Cleared to see-through when the interface lets the window material show; otherwise the plain panel colour.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.translucency().any() {
+            [0.0; 4]
+        } else {
+            egui::Color32::from_rgb(visuals.panel_fill.r(), visuals.panel_fill.g(), visuals.panel_fill.b()).to_normalized_gamma_f32()
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_layout_now();
     }
 }
 
 impl App {
+    /// Hand the chosen window material to Windows when it (or the dark / light appearance) changes.
+    fn sync_backdrop(&mut self, ctx: &Context, frame: &eframe::Frame) {
+        if !self.persist {
+            return;
+        }
+        let dark = ctx.theme() == egui::Theme::Dark;
+        if self.applied_backdrop.is_some_and(|(b, d, _)| b == self.settings.backdrop && d == dark) {
+            return;
+        }
+        let ok = crate::backdrop::apply(frame, self.settings.backdrop, dark);
+        self.applied_backdrop = Some((self.settings.backdrop, dark, ok));
+    }
+
+    /// Windows is drawing the window material, so the panels and the graph may let it through.
+    pub fn backdrop_on(&self) -> bool {
+        self.applied_backdrop.is_some_and(|(_, _, ok)| ok)
+    }
+
+    /// The translucency to draw with: the settings, as far as Windows can show them.
+    pub fn translucency(&self) -> crate::theme::Translucency {
+        self.settings.translucency(self.backdrop_on())
+    }
+
     pub fn ui_inner(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let t0 = std::time::Instant::now();
         self.prof.frame_start();
+        if self.persist {
+            crate::theme::set_translucency(&ctx, self.translucency());
+        }
         self.handle_drops(&ctx);
         self.handle_shortcuts(&ctx);
         self.update_window_title(&ctx);
         self.follow_theme(&ctx);
 
-        egui::Panel::top("menu").frame(egui::Frame::new().fill(crate::theme::pal_ctx(&ctx).bg).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| self.menu_bar(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::pal_ctx(&ctx).bg)).show(ui, |ui| self.show_dock(ui));
+        if self.maximized {
+            // just the graph (with its view controls and the way back)
+            egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| self.canvas(ui));
+        } else {
+            let pal = crate::theme::pal_tl(&ctx);
+            egui::Panel::top("menu").frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| self.menu_bar(ui));
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(pal.bg)).show(ui, |ui| self.show_dock(ui));
+        }
 
         self.persist_layout(&ctx);
         self.dialogs(&ctx);
@@ -776,13 +853,15 @@ mod ui_tests {
         last_verts: usize,
         last_ui_ms: f64,
         last_tess_ms: f64,
+        /// Every piece of text drawn in the last frame, with where it is.
+        last_texts: Vec<(String, egui::Rect)>,
     }
 
     impl Harness {
         fn new() -> Self {
             let ctx = Context::default();
             let app = App::new_with_ctx(&ctx, Args { edges: None, nodes: None, json: None, directed: false, project: None });
-            Harness { ctx, app, t: 0.0, mods: Modifiers::NONE, applied: Modifiers::NONE, last_verts: 0, last_ui_ms: 0.0, last_tess_ms: 0.0 }
+            Harness { ctx, app, t: 0.0, mods: Modifiers::NONE, applied: Modifiers::NONE, last_verts: 0, last_ui_ms: 0.0, last_tess_ms: 0.0, last_texts: vec![] }
         }
 
         fn frame(&mut self, events: Vec<Event>) {
@@ -800,6 +879,11 @@ mod ui_tests {
             let mut out = self.ctx.run_ui(input, |ui| app.ui_inner(ui));
             self.last_ui_ms = t_ui.elapsed().as_secs_f64() * 1000.0;
             out.textures_delta.clear(); // not uploading anywhere; egui panics on dropping unapplied deltas
+            self.last_texts = out
+                .shapes
+                .iter()
+                .filter_map(|s| if let egui::epaint::Shape::Text(t) = &s.shape { Some((t.galley.text().to_string(), egui::Rect::from_min_size(t.pos, t.galley.size()))) } else { None })
+                .collect();
             let t_tess = std::time::Instant::now();
             let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
             self.last_tess_ms = t_tess.elapsed().as_secs_f64() * 1000.0;
@@ -1725,6 +1809,181 @@ mod ui_tests {
         h.app.settings.show_frame_time = false;
         h.frames(3);
         assert!(h.app.view.toolbar_rect.is_none());
+    }
+
+    #[test]
+    fn maximised_graph_hides_the_panels_keeps_the_view_controls_and_can_be_closed() {
+        let mut h = grid_harness();
+        h.app.settings.show_toolbar = false;
+        h.frames(2);
+        assert!(h.app.view.toolbar_rect.is_none());
+        let canvas_before = h.app.canvas_rect;
+        h.app.set_maximized(&h.ctx.clone(), true);
+        h.frames(4);
+        assert!(h.app.maximized);
+        assert!(h.app.view.toolbar_rect.is_some(), "the view controls are there even if they were switched off");
+        assert!(h.app.canvas_rect.width() > canvas_before.width() + 100.0 && h.app.canvas_rect.top() < canvas_before.top() - 10.0, "the graph fills the window");
+        // a click on the close button leaves it
+        let r = h.app.canvas_rect;
+        let close = egui::pos2(r.right() - 40.0, r.top() + 25.0);
+        h.click(close, Modifiers::NONE);
+        assert!(!h.app.maximized, "close button");
+        assert!(h.app.canvas_rect.width() < r.width());
+        // F11 toggles, and Esc leaves (a selection takes the first Esc)
+        h.press_plain(egui::Key::F11);
+        assert!(h.app.maximized);
+        h.app.s.select_only(3);
+        h.press_plain(egui::Key::Escape);
+        assert!(h.app.maximized && !h.app.s.has_selection(), "the first Esc only clears the selection");
+        h.press_plain(egui::Key::Escape);
+        assert!(!h.app.maximized);
+    }
+
+    impl Harness {
+        fn press_plain(&mut self, k: egui::Key) {
+            self.frame(vec![key_ev(k, true)]);
+            self.frame(vec![key_ev(k, false)]);
+            self.frames(2);
+        }
+    }
+
+    #[test]
+    fn settings_is_a_button_that_opens_the_settings_window() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(10);
+        assert!(!h.app.show_settings);
+        // the menu bar's Settings entry is a plain button: find its text on screen and click it
+        let btn = h.last_texts.iter().find(|(t, r)| t == "Settings" && r.top() < 40.0).map(|(_, r)| r.center()).expect("a Settings entry in the menu bar");
+        h.click(btn, Modifiers::NONE);
+        assert!(h.app.show_settings, "clicking Settings opens the settings window");
+        h.frames(3);
+        // and it opens nothing else: no drop-down menu is left open
+        assert!(!h.ctx.any_popup_open());
+    }
+
+    #[test]
+    fn translucency_fades_the_panels_the_graph_and_the_menus_separately() {
+        use crate::theme::{self, Backdrop, Translucency};
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(10);
+        let d = crate::config::Settings::default();
+        assert_eq!((d.backdrop, d.panel_opacity, d.board_opacity, d.menu_opacity), (Backdrop::Acrylic, 0.4, 1.0, 0.9));
+        assert_eq!(d.translucency(true), Translucency { panels: 0.4, board: 1.0, menus: 0.9 });
+        let solid = Translucency { panels: 1.0, board: 1.0, menus: 0.9 };
+        let none = crate::config::Settings { backdrop: Backdrop::None, ..Default::default() };
+        assert_eq!(none.translucency(true), solid, "no backdrop, nothing behind the panels; menus still see through");
+        assert_eq!(d.translucency(false), solid, "Windows did not take the backdrop");
+        assert!(!solid.any(), "menus alone do not need a see-through window");
+        theme::set_translucency(&h.ctx, d.translucency(true));
+        h.frames(3);
+        let st = theme::dock_style(&h.ctx);
+        assert_eq!(st.tab.tab_body.bg_fill.a(), (theme::DARK.bg_elevated.a() as f32 * 0.4 * 0.6).round() as u8);
+        assert_eq!(h.ctx.global_style().visuals.window_fill.a(), (255.0f32 * 0.9).round() as u8);
+        assert_eq!(h.ctx.global_style().visuals.panel_fill.a(), (255.0f32 * 0.4).round() as u8);
+        assert_eq!(theme::translucency(&h.ctx).board, 1.0);
+        // and the dark / light switch keeps it
+        theme::set_mode(&h.ctx, theme::ThemeMode::Light);
+        h.frames(2);
+        assert_eq!(h.ctx.global_style().visuals.panel_fill.a(), (255.0f32 * 0.4).round() as u8);
+        theme::set_mode(&h.ctx, theme::ThemeMode::Dark);
+        theme::set_translucency(&h.ctx, Translucency::OPAQUE);
+        h.frames(2);
+        assert_eq!(h.ctx.global_style().visuals.panel_fill, theme::DARK.bg);
+    }
+
+    #[test]
+    fn settings_window_with_translucency_draws_and_the_old_settings_file_still_loads() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.app.show_settings = true;
+        h.frames(4);
+        h.app.settings.backdrop = crate::theme::Backdrop::None;
+        h.frames(2);
+        let old: crate::config::Settings = serde_json::from_str(r#"{"recent":[],"theme":"Dark"}"#).unwrap();
+        assert_eq!(old.backdrop, crate::theme::Backdrop::Acrylic);
+        assert_eq!(old.panel_opacity, 0.4);
+    }
+
+    #[test]
+    fn clicking_an_edge_selects_it_and_ctrl_click_adds_a_node() {
+        let mut h = grid_harness();
+        h.app.s.look.node_size = 3.0;
+        h.frames(2);
+        let r = h.app.canvas_rect;
+        // an edge whose middle is well away from every node
+        let n = h.app.s.g.n();
+        let pos: Vec<Pos2> = (0..n).map(|i| h.node_screen_pos(i)).collect();
+        let mut found = None;
+        for (e, &(a, b)) in h.app.s.g.edges.iter().enumerate() {
+            let (pa, pb) = (pos[a as usize], pos[b as usize]);
+            let mid = pa + (pb - pa) * 0.5;
+            if (pa - pb).length() > 12.0 && r.contains(mid) && !h.app.view.over_toolbar(mid) && (0..n).all(|i| (pos[i] - mid).length() > 9.0) {
+                found = Some((e, mid));
+                break;
+            }
+        }
+        let (_, mid) = found.expect("a long edge in the sample");
+        h.click(mid, Modifiers::NONE);
+        // (another edge may cross at that spot; whichever is nearest is taken)
+        assert_eq!(h.app.s.sel_edges.len(), 1, "an edge is selected");
+        assert_eq!(h.app.s.sel_count, 0);
+        let e = h.app.s.sel_edges[0] as usize;
+        // Ctrl+click on a node adds it
+        let node = (0..n).find(|&i| r.contains(pos[i]) && !h.app.view.over_toolbar(pos[i])).unwrap();
+        h.click(pos[node], Modifiers::CTRL);
+        assert_eq!(h.app.s.sel_edges, vec![e as u32]);
+        assert!(h.app.s.sel[node]);
+        // Esc clears both
+        h.press_plain(egui::Key::Escape);
+        assert!(!h.app.s.has_selection());
+    }
+
+    #[test]
+    fn dragging_in_3d_orbits_around_the_selection() {
+        let mut h = harness_3d();
+        h.app.s.select_only(25);
+        h.frames(2);
+        let size = h.app.canvas_rect.size();
+        let before = h.app.s.cam3.orbit(size).project(h.app.s.pos3[25]).unwrap().0;
+        let yaw0 = h.app.s.cam3.yaw;
+        let r = h.app.canvas_rect;
+        let a = r.min + Vec2::new(30.0, 90.0);
+        h.drag(a, a + Vec2::new(160.0, 40.0));
+        let after = h.app.s.cam3.orbit(size).project(h.app.s.pos3[25]).unwrap().0;
+        assert!((h.app.s.cam3.yaw - yaw0).abs() > 0.2, "the view turned");
+        assert!((before - after).length() < 1.0, "the selected node stayed where it was on screen: {before:?} -> {after:?}");
+        // with nothing selected the view turns around its own centre, as before
+        h.app.s.clear_selection();
+        h.frames(2);
+        let target = h.app.s.cam3.target;
+        h.drag(a, a + Vec2::new(-120.0, 0.0));
+        assert!((0..3).all(|k| (h.app.s.cam3.target[k] - target[k]).abs() < 1e-3), "the centre did not move");
+    }
+
+    #[test]
+    fn attribute_columns_can_be_hidden_and_brought_back() {
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(10);
+        let names: Vec<String> = h.app.s.g.node_cols.iter().filter(|c| !c.is_metric).map(|c| c.name.clone()).collect();
+        assert!(names.len() >= 2);
+        h.app.hide_column(&names[0]);
+        h.app.hide_column(&names[0]);
+        h.app.hide_column("id");
+        h.frames(4);
+        assert_eq!(h.app.table.hidden, vec![names[0].clone()], "once, and never the id column");
+        h.app.table.picked = vec![names[1].clone()];
+        h.app.hide_column(&names[1]);
+        assert!(h.app.table.picked.is_empty() && h.app.table.hidden.len() == 2);
+        h.frames(4);
+        // loading something else forgets columns that are gone
+        h.app.table.hidden.push("no such column".into());
+        h.frames(2);
+        assert!(!h.app.table.hidden.contains(&"no such column".to_string()));
+        h.app.table.hidden.clear();
+        h.frames(2);
     }
 
     #[test]

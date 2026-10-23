@@ -369,6 +369,8 @@ pub struct Session {
     pub sel: Vec<bool>,
     pub sel_count: usize,
     pub sel_version: u64,
+    /// Selected edges (indices into `g.edges`). Edges can be selected on their own or together with nodes.
+    pub sel_edges: Vec<u32>,
     pub style: StyleCache,
     pub fit_requested: bool,
     anim: Option<Anim>,
@@ -416,6 +418,7 @@ impl Default for Session {
             sel: vec![],
             sel_count: 0,
             sel_version: 0,
+            sel_edges: vec![],
             style: StyleCache::default(),
             fit_requested: false,
             anim: None,
@@ -495,6 +498,7 @@ impl Session {
         self.manual_hidden = vec![false; n];
         self.sel = vec![false; n];
         self.sel_count = 0;
+        self.sel_edges.clear();
         self.sel_version += 1;
         self.sim = ForceSim::new();
         self.anim = None;
@@ -953,6 +957,74 @@ impl Session {
             self.sel_count = 0;
             self.sel_version += 1;
         }
+        if !self.sel_edges.is_empty() {
+            self.sel_edges.clear();
+            self.sel_version += 1;
+        }
+    }
+
+    pub fn edge_selected(&self, e: usize) -> bool {
+        self.sel_edges.contains(&(e as u32))
+    }
+
+    pub fn set_edge_selected(&mut self, e: usize, on: bool) {
+        if e >= self.g.edges.len() {
+            return;
+        }
+        let at = self.sel_edges.iter().position(|&x| x == e as u32);
+        match (at, on) {
+            (None, true) => self.sel_edges.push(e as u32),
+            (Some(k), false) => {
+                self.sel_edges.remove(k);
+            }
+            _ => return,
+        }
+        self.sel_version += 1;
+    }
+
+    pub fn toggle_edge_selected(&mut self, e: usize) {
+        let on = !self.edge_selected(e);
+        self.set_edge_selected(e, on);
+    }
+
+    /// Make this edge the whole selection.
+    pub fn select_only_edge(&mut self, e: usize) {
+        self.clear_selection();
+        self.set_edge_selected(e, true);
+    }
+
+    /// Is anything at all selected (nodes or edges)?
+    pub fn has_selection(&self) -> bool {
+        self.sel_count > 0 || !self.sel_edges.is_empty()
+    }
+
+    /// The nodes the selection stands for: the selected nodes and the two ends of every selected edge (visible ones only).
+    pub fn selection_nodes(&self) -> Vec<usize> {
+        let mut mark = self.sel.clone();
+        for &e in &self.sel_edges {
+            if let Some(&(a, b)) = self.g.edges.get(e as usize) {
+                mark[a as usize] = true;
+                mark[b as usize] = true;
+            }
+        }
+        (0..self.g.n()).filter(|&i| mark[i] && self.vis[i]).collect()
+    }
+
+    /// The point the 3D camera turns around: the middle of the box around the selected nodes and selected edges
+    /// (an edge counts with both of its ends). None when nothing visible is selected.
+    pub fn selection_pivot3(&self) -> Option<[f32; 3]> {
+        let nodes = self.selection_nodes();
+        if nodes.is_empty() || self.pos3.len() != self.g.n() {
+            return None;
+        }
+        let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for i in nodes {
+            for k in 0..3 {
+                lo[k] = lo[k].min(self.pos3[i][k]);
+                hi[k] = hi[k].max(self.pos3[i][k]);
+            }
+        }
+        Some([(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5])
     }
 
     pub fn set_selected(&mut self, i: usize, on: bool) {
@@ -1686,6 +1758,41 @@ pub fn pick_node(s: &Session, cam: &ViewCam, size: V2, p: V2) -> Option<usize> {
         }
     }
     best.map(|(i, _, _)| i)
+}
+
+/// Index of the visible edge closest to `p` (screen space) if it passes within a few pixels of it.
+pub fn pick_edge(s: &Session, cam: &ViewCam, size: V2, p: V2) -> Option<usize> {
+    if s.graph_hidden() {
+        return None;
+    }
+    let proj = s.projector(cam, size);
+    let reach = 5.0f32.max(s.look.edge_width * 0.5 + 3.0);
+    let mut best: Option<(usize, f32, f32)> = None; // index, pixel distance, depth
+    for (e, &(a, b)) in s.g.edges.iter().enumerate() {
+        let (a, b) = (a as usize, b as usize);
+        if !s.vis[a] || !s.vis[b] || s.section_hides(a) || s.section_hides(b) {
+            continue;
+        }
+        let (Some((pa, _, da)), Some((pb, _, db))) = (proj.at(s, a), proj.at(s, b)) else { continue };
+        let d = pb - pa;
+        let len2 = d.length_sq();
+        let t = if len2 < 1e-6 { 0.0 } else { (((p - pa).x * d.x + (p - pa).y * d.y) / len2).clamp(0.0, 1.0) };
+        let dist = (pa + d * t - p).length();
+        if dist > reach {
+            continue;
+        }
+        let depth = da + (db - da) * t;
+        let better = match best {
+            None => true,
+            Some((_, bd, bdepth)) => {
+                if matches!(proj, Projector::Orbit(_)) { depth < bdepth - 1e-3 || ((depth - bdepth).abs() <= 1e-3 && dist < bd) } else { dist < bd }
+            }
+        };
+        if better {
+            best = Some((e, dist, depth));
+        }
+    }
+    best.map(|(e, _, _)| e)
 }
 
 #[cfg(test)]

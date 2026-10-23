@@ -237,6 +237,22 @@ impl Cam3 {
         self.dist = need;
     }
 
+    /// Turn the camera by `d_yaw` / `d_pitch` around `pivot` instead of around the target: the pivot stays exactly
+    /// where it is on the screen and everything else swings around it. With the pivot at the target this is the
+    /// plain orbit.
+    pub fn orbit_about(&mut self, pivot: V3, d_yaw: f32, d_pitch: f32, size: V2) {
+        let o = self.orbit(size);
+        let rel = sub(pivot, self.target);
+        let seen = [dot(rel, o.right), dot(rel, o.up), dot(rel, o.fwd)];
+        self.yaw += d_yaw;
+        self.pitch += d_pitch;
+        self.clamp();
+        let o2 = self.orbit(size);
+        for k in 0..3 {
+            self.target[k] = pivot[k] - (seen[0] * o2.right[k] + seen[1] * o2.up[k] + seen[2] * o2.fwd[k]);
+        }
+    }
+
     /// Zoom so that the (canvas-local, from the middle) rectangle fills the view.
     pub fn zoom_to_rect(&mut self, centre: V2, rect_size: V2, size: V2) {
         let o = self.orbit(size);
