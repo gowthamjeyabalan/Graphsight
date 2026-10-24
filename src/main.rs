@@ -31,10 +31,10 @@ use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
 const HELP: &str = "\
-Grapht — fast graph explorer for CSV and JSON files
+Graphsight — fast graph explorer for CSV and JSON files
 
 USAGE
-  grapht [FILES] [OPTIONS]
+  graphsight [FILES] [OPTIONS]
 
 INPUT
   --edges FILE        edges CSV/TSV (columns like source,target[,weight,…])
@@ -42,7 +42,7 @@ INPUT
   --json FILE         JSON graph ({nodes,links|edges}, Cytoscape elements, edge array)
   --directed          treat edges as directed
   FILE                a bare .csv/.json path is classified automatically;
-                      a .grapht path opens a saved session
+                      a .graphsight path opens a saved session
 
 HEADLESS EXPORT (no window)
   --export-png OUT    render the graph to a PNG
@@ -244,9 +244,9 @@ fn attach_parent_console() {
     }
 }
 
-/// The Grapht app icon (256 px PNG baked into the binary), used for the window and taskbar.
+/// The Graphsight app icon (256 px PNG baked into the binary), used for the window and taskbar.
 fn window_icon() -> egui::IconData {
-    const PNG: &[u8] = include_bytes!("../assets/icon/grapht-256.png");
+    const PNG: &[u8] = include_bytes!("../assets/icon/graphsight-256.png");
     match tiny_skia::Pixmap::decode_png(PNG) {
         Ok(pm) => {
             // tiny-skia stores premultiplied alpha, IconData wants straight RGBA
@@ -285,7 +285,7 @@ fn main() -> Result<()> {
     // classify bare paths for the GUI
     let mut args = app::Args { edges: cli.edges, nodes: cli.nodes, json: cli.json, directed: cli.directed, project: None };
     for p in cli.positional {
-        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case(project::EXTENSION)) {
+        if project::is_session(&p) {
             args.project = Some(p);
         } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
             args.json = Some(p);
@@ -298,7 +298,7 @@ fn main() -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Grapht")
+            .with_title("Graphsight")
             .with_icon(window_icon())
             .with_inner_size([1480.0, 920.0])
             .with_min_inner_size([920.0, 580.0])
@@ -309,7 +309,7 @@ fn main() -> Result<()> {
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
-    eframe::run_native("Grapht", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args))))).map_err(|e| anyhow::anyhow!("{e}"))
+    eframe::run_native("Graphsight", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args))))).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Counts heap use in the tests so the benchmarks can report exact numbers.

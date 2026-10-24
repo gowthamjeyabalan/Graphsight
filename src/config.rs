@@ -6,25 +6,39 @@ use egui_dock::DockState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// `%APPDATA%\Grapht` on Windows, `~/Library/Application Support/Grapht` on macOS, `~/.config/grapht` elsewhere.
+/// `%APPDATA%\Graphsight` on Windows, `~/Library/Application Support/Graphsight` on macOS, `~/.config/graphsight` elsewhere.
 pub fn config_dir() -> Option<PathBuf> {
-    if let Some(d) = std::env::var_os("GRAPHT_CONFIG_DIR") {
+    if let Some(d) = std::env::var_os("GRAPHSIGHT_CONFIG_DIR") {
         return Some(d.into());
     }
     #[cfg(windows)]
     {
-        std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Grapht"))
+        std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Graphsight"))
     }
     #[cfg(target_os = "macos")]
     {
-        std::env::var_os("HOME").map(|d| PathBuf::from(d).join("Library/Application Support/Grapht"))
+        std::env::var_os("HOME").map(|d| PathBuf::from(d).join("Library/Application Support/Graphsight"))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|d| d.join("grapht"))
+            .map(|d| d.join("graphsight"))
+    }
+}
+
+/// Graphsight was called Grapht and kept its settings, recent sessions and workspaces under that name: move that
+/// folder to the new place, once, when there is nothing there yet.
+pub fn move_old_settings() {
+    if std::env::var_os("GRAPHSIGHT_CONFIG_DIR").is_some() {
+        return;
+    }
+    let Some(new) = config_dir() else { return };
+    let Some(parent) = new.parent() else { return };
+    let old = parent.join(if cfg!(any(windows, target_os = "macos")) { "Grapht" } else { "grapht" });
+    if !new.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &new);
     }
 }
 
@@ -41,7 +55,7 @@ pub struct Settings {
     pub graph_follows_theme: bool,
     /// Interface scale (1.0 = normal).
     pub ui_scale: f32,
-    /// Open the panel arrangement that was open when Grapht was last closed.
+    /// Open the panel arrangement that was open when Graphsight was last closed.
     pub restore_layout: bool,
     /// The floating zoom / view buttons at the bottom of the graph.
     pub show_toolbar: bool,

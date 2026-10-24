@@ -1,4 +1,4 @@
-//! Optional frame profiler: set GRAPHT_PROF=1 and Grapht prints average stage times and memory to stderr
+//! Optional frame profiler: set GRAPHSIGHT_PROF=1 and Graphsight prints average stage times and memory to stderr
 //! every 20 frames. Costs nothing when the variable is not set.
 
 use std::sync::OnceLock;
@@ -8,7 +8,7 @@ pub const STAGES: [&str; 6] = ["sim", "input", "build", "paint", "ui", "wall"];
 
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("GRAPHT_PROF").is_some())
+    *ON.get_or_init(|| std::env::var_os("GRAPHSIGHT_PROF").is_some())
 }
 
 pub struct Prof {

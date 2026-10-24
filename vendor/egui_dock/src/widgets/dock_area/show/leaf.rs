@@ -193,7 +193,7 @@ impl<Tab> DockArea<'_, Tab> {
             .hidden_tab_bar_drag_height
             .is_none_or(|h| h > 0.0);
         if self.draggable_tabs && drag_enabled && !on_button {
-            // Grapht: keep the normal arrow cursor (Windows draws Grab / Grabbing as the four-way "move" cursor).
+            // Graphsight: keep the normal arrow cursor (Windows draws Grab / Grabbing as the four-way "move" cursor).
             let is_being_dragged = ui.ctx().is_being_dragged(drag_id)
                 && ui.input(|i| i.pointer.is_decidedly_dragging());
             if is_being_dragged {

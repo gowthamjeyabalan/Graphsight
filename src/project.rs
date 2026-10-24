@@ -1,6 +1,6 @@
 //! Work sessions: everything needed to come back to exactly the same view later.
 //!
-//! A session file (`.grapht`, JSON) stores which files were loaded and how their columns were mapped,
+//! A session file (`.graphsight`, JSON; `.grapht` from before the rename still opens) stores which files were loaded and how their columns were mapped,
 //! the appearance / layout / filter settings, node positions and pins, the selection, hand-hidden nodes,
 //! the table sort and the camera. The data itself is re-read from the original files.
 
@@ -12,7 +12,14 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const EXTENSION: &str = "grapht";
+pub const EXTENSION: &str = "graphsight";
+/// Sessions saved while the app was called Grapht; they still open.
+pub const OLD_EXTENSION: &str = "grapht";
+
+/// Is this a session file (new or old extension)?
+pub fn is_session(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION) || e.eq_ignore_ascii_case(OLD_EXTENSION))
+}
 const VERSION: u32 = 1;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -60,7 +67,7 @@ pub struct ProjectFile {
 impl Default for ProjectFile {
     fn default() -> Self {
         ProjectFile {
-            app: "Grapht".into(),
+            app: "Graphsight".into(),
             version: VERSION,
             edges: None,
             nodes: None,
@@ -124,8 +131,8 @@ fn is_json(p: &Path) -> bool {
 impl App {
     pub fn project_title(&self) -> String {
         match &self.project {
-            Some(p) => format!("{} — Grapht", p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
-            None => "Grapht".to_string(),
+            Some(p) => format!("{} — Graphsight", p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+            None => "Graphsight".to_string(),
         }
     }
 
@@ -174,7 +181,7 @@ impl App {
         let base = path.parent().map(|p| p.to_path_buf());
         let pf = self.build_project(base.as_deref());
         let text = serde_json::to_string_pretty(&pf)?;
-        let tmp = path.with_extension("grapht.tmp");
+        let tmp = path.with_extension("graphsight.tmp");
         std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &path).with_context(|| format!("saving {}", path.display()))?;
         self.project = Some(path.clone());
@@ -191,7 +198,7 @@ impl App {
 
     /// Returns false if the user cancelled the dialog.
     pub fn save_project_as(&mut self) -> Result<bool> {
-        let mut d = rfd::FileDialog::new().add_filter("Grapht session", &[EXTENSION]).set_file_name("session.grapht");
+        let mut d = rfd::FileDialog::new().add_filter("Graphsight session", &[EXTENSION]).set_file_name("session.graphsight");
         if let Some(dir) = self.project.as_ref().and_then(|p| p.parent()) {
             d = d.set_directory(dir);
         }
@@ -202,7 +209,7 @@ impl App {
     }
 
     pub fn open_project_dialog(&mut self) {
-        let mut d = rfd::FileDialog::new().add_filter("Grapht session", &[EXTENSION]);
+        let mut d = rfd::FileDialog::new().add_filter("Graphsight session", &[EXTENSION, OLD_EXTENSION]);
         if let Some(dir) = self.project.as_ref().and_then(|p| p.parent()) {
             d = d.set_directory(dir);
         }
@@ -242,9 +249,9 @@ impl App {
 
     fn try_open_project(&mut self, path: &Path) -> Result<Vec<String>> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let pf: ProjectFile = serde_json::from_str(&text).with_context(|| format!("{} is not a valid Grapht session", path.display()))?;
+        let pf: ProjectFile = serde_json::from_str(&text).with_context(|| format!("{} is not a valid Graphsight session", path.display()))?;
         if pf.version > VERSION {
-            bail!("this session was saved by a newer version of Grapht (format {}).", pf.version);
+            bail!("this session was saved by a newer version of Graphsight (format {}).", pf.version);
         }
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let mut warnings = Vec::new();

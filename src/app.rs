@@ -125,6 +125,7 @@ impl App {
         let has_project = args.project.is_some();
         let mut app = Self::new_with_ctx(&cc.egui_ctx, args);
         app.persist = true;
+        crate::config::move_old_settings();
         app.settings = crate::config::Settings::load();
         app.workspaces = crate::config::load_workspaces();
         crate::theme::set_mode(&cc.egui_ctx, app.settings.theme);
@@ -255,6 +256,10 @@ impl App {
     pub fn load_path(&mut self, path: PathBuf, hint: Option<PendKindHint>) {
         let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if crate::project::is_session(&path) {
+            self.open_project(&path);
+            return;
+        }
         if ext == "json" || ext == "geojson" {
             match self.s.load_json(&path) {
                 Ok(()) => self.rebuild(),
@@ -972,7 +977,7 @@ mod ui_tests {
 
     #[test]
     fn session_file_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("grapht-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("graphsight-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("e.csv"), SAMPLE_EDGES).unwrap();
         std::fs::write(dir.join("n.csv"), SAMPLE_NODES).unwrap();
@@ -996,7 +1001,7 @@ mod ui_tests {
         h.app.auto_fit = false;
         let want_pos = h.app.s.pos.clone();
         let want_id5 = h.app.s.g.ids[5].clone();
-        let file = dir.join("work.grapht");
+        let file = dir.join("work.graphsight");
         h.app.save_project_to(&file).unwrap();
         assert!(h.app.project.as_deref() == Some(file.as_path()));
 
@@ -1513,7 +1518,7 @@ mod ui_tests {
 
     #[test]
     fn json_roundtrip_through_the_gui_loader() {
-        let dir = std::env::temp_dir().join("grapht_ui_test");
+        let dir = std::env::temp_dir().join("graphsight_ui_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("g.json");
         std::fs::write(&path, r#"{"directed":true,"nodes":[{"id":"a","kind":"x"},{"id":"b","kind":"y"},{"id":"c","kind":"x"}],"links":[{"source":"a","target":"b"},{"source":"b","target":"c"}]}"#).unwrap();
@@ -1527,7 +1532,7 @@ mod ui_tests {
 
     #[test]
     fn csv_import_dialog_flow() {
-        let dir = std::env::temp_dir().join("grapht_ui_test");
+        let dir = std::env::temp_dir().join("graphsight_ui_test");
         std::fs::create_dir_all(&dir).unwrap();
         // unusual column names → the mapping dialog must appear instead of silently guessing
         let e = dir.join("odd_edges.csv");
@@ -1803,8 +1808,8 @@ mod ui_tests {
         let d = crate::config::Settings::default();
         assert!(d.show_toolbar && d.show_tooltips && d.restore_layout && d.graph_follows_theme && d.animate_view);
         // old settings files (without the new fields) still load
-        let old: crate::config::Settings = serde_json::from_str(r#"{"recent":["a.grapht"],"animate_view":false}"#).unwrap();
-        assert_eq!(old.recent, ["a.grapht"]);
+        let old: crate::config::Settings = serde_json::from_str(r#"{"recent":["a.graphsight"],"animate_view":false}"#).unwrap();
+        assert_eq!(old.recent, ["a.graphsight"]);
         assert!(!old.animate_view && old.show_toolbar && old.theme == crate::theme::ThemeMode::Dark);
         // hiding the toolbar leaves the graph drawn
         h.app.settings.show_toolbar = false;

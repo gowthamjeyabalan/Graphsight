@@ -131,7 +131,7 @@ impl Translucency {
 
 #[allow(deprecated)]
 fn tl_id() -> egui::Id {
-    egui::Id::new("grapht-translucency")
+    egui::Id::new("graphsight-translucency")
 }
 
 /// The translucency the interface is drawn with right now.

@@ -1435,8 +1435,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "grapht"
-version = "0.9.0"
+name = "graphsight"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "csv",

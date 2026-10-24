@@ -340,7 +340,7 @@ impl App {
         });
 
         settings_group(ui, "TRANSLUCENCY");
-        setting_row(ui, "Window backdrop", "The material Windows 11 draws behind Grapht. Mica takes a soft tint from the desktop wallpaper, Mica Alt a stronger one, and Acrylic blurs whatever is behind the window.", |ui| {
+        setting_row(ui, "Window backdrop", "The material Windows 11 draws behind Graphsight. Mica takes a soft tint from the desktop wallpaper, Mica Alt a stronger one, and Acrylic blurs whatever is behind the window.", |ui| {
             ui.set_width(300.0);
             let mut b = self.settings.backdrop;
             if ui.segmented(&mut b, &[(Backdrop::None, "None"), (Backdrop::Mica, "Mica"), (Backdrop::MicaAlt, "Mica Alt"), (Backdrop::Acrylic, "Acrylic")]) {
@@ -400,7 +400,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let mut changed = false;
         settings_group(ui, "STARTING");
-        setting_row(ui, "Reopen the panel arrangement", "When Grapht opens, put the panels back the way they were. When off, it starts with the default layout.", |ui| {
+        setting_row(ui, "Reopen the panel arrangement", "When Graphsight opens, put the panels back the way they were. When off, it starts with the default layout.", |ui| {
             changed |= ui.switch(&mut self.settings.restore_layout, "").changed();
         });
         setting_row(ui, "Panel layout", "Put every panel back in its usual place now.", |ui| {
@@ -464,12 +464,12 @@ fn settings_shortcuts(ui: &mut Ui) -> bool {
 fn settings_about(ui: &mut Ui) -> bool {
     let p = theme::pal_ctx(ui.ctx());
     ui.add_space(8.0);
-    ui.label(theme::semibold(format!("Grapht {}", env!("CARGO_PKG_VERSION"))).size(15.0).color(p.text));
+    ui.label(theme::semibold(format!("Graphsight {}", env!("CARGO_PKG_VERSION"))).size(15.0).color(p.text));
     ui.label(egui::RichText::new("A fast native desktop app for exploring graphs stored in CSV and JSON files.").size(13.0).color(p.text_secondary));
     ui.add_space(10.0);
     ui.label(egui::RichText::new("Written in Rust with egui. Released under the MIT licence.").size(12.5).color(p.text_secondary));
     ui.add_space(6.0);
-    ui.hyperlink_to("github.com/gowthamjeyabalan/Grapht", "https://github.com/gowthamjeyabalan/Grapht");
+    ui.hyperlink_to("github.com/gowthamjeyabalan/Graphsight", "https://github.com/gowthamjeyabalan/Graphsight");
     false
 }
 

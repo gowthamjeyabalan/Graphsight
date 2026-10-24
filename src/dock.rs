@@ -140,7 +140,7 @@ impl TabViewer for Viewer<'_> {
 
     fn id(&mut self, tab: &mut Tab) -> Id {
         #[allow(deprecated)]
-        Id::new(("grapht-tab", *tab))
+        Id::new(("graphsight-tab", *tab))
     }
 
     fn title(&mut self, tab: &mut Tab) -> WidgetText {

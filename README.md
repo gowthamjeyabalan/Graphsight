@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/grapht-logo-dark.svg">
-    <img src="assets/readme/grapht-logo-light.svg" alt="Grapht" width="340">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/graphsight-logo-dark.svg">
+    <img src="assets/readme/graphsight-logo-light.svg" alt="Graphsight" width="480">
   </picture>
 </p>
 
@@ -12,14 +12,18 @@ those attributes; switch between layouts; export PNG / SVG.
 Designed for graphs of roughly 1 000 – 10 000 nodes. Measured on a 2-core cloud VM with a 10 000-node /
 50 000-edge graph: load + metrics 88 ms, force layout converges in ~3 s, one UI frame costs ~6 ms of CPU.
 
+Graphsight was called **Grapht** before version 1.0. Sessions saved as `.grapht` still open, your settings, recent
+sessions and workspaces move over by themselves, and the 1.0 installer upgrades an installed Grapht in place. The look
+follows the **GJ Design System**.
+
 ## Download
 
 Ready-made Windows builds are on the repository's **Releases** page:
 
-* **Installer** — `grapht-setup-x64.exe` installs Grapht for your user account (no admin rights needed; it can also
-  install for all users), adds it to the Start menu, optionally to the desktop, and makes `.grapht` session files
-  open in Grapht. Running a newer installer updates the installed copy; uninstall from *Settings ▸ Apps*.
-* **Portable** — `grapht-windows-x64.zip`: unzip it and run `grapht.exe` (no install needed).
+* **Installer** — `graphsight-setup-x64.exe` installs Graphsight for your user account (no admin rights needed; it can also
+  install for all users), adds it to the Start menu, optionally to the desktop, and makes `.graphsight` session files
+  open in Graphsight. Running a newer installer updates the installed copy; uninstall from *Settings ▸ Apps*.
+* **Portable** — `graphsight-windows-x64.zip`: unzip it and run `graphsight.exe` (no install needed).
 
 Windows may show a SmartScreen warning for an unsigned app; choose *More info ▸ Run anyway*. Each file has a
 `.sha256` checksum next to it.
@@ -31,7 +35,7 @@ Windows:
 1. Install Rust from <https://rustup.rs> (accept the default MSVC toolchain; it will ask you to install the
    Visual Studio C++ Build Tools if they are missing).
 2. In this folder: `cargo build --release`
-3. Run `target\release\grapht.exe` (or `cargo run --release`).
+3. Run `target\release\graphsight.exe` (or `cargo run --release`).
 
 macOS / Linux: the same `cargo build --release`. (Linux needs the usual X11/Wayland + Vulkan or OpenGL libraries.)
 
@@ -47,10 +51,10 @@ along the bottom, and the inspector and legend on the right.
 * **Move panels:** drag a tab by its title onto another panel to tab them together, or onto an edge to split; drag the
   dividers to resize. Right-click a tab for *Close panel*; bring panels back with **View ▸ Panels**.
   **View ▸ Reset panel layout** restores the default (use it, or View ▸ Panels ▸ Query, if you saved a layout before the Query panel existed). The arrangement is saved automatically (in
-  `%APPDATA%\Grapht\layout.json`) and restored at the next start.
-* **Sessions:** **File ▸ Save session** (Ctrl+S) writes a `.grapht` file with the loaded files and column mappings,
+  `%APPDATA%\Graphsight\layout.json`) and restored at the next start.
+* **Sessions:** **File ▸ Save session** (Ctrl+S) writes a `.graphsight` file with the loaded files and column mappings,
   all appearance / layout / filter settings, node positions and pins, the selection, hand-hidden nodes, the table
-  sort and the camera. **Open session** (Ctrl+O), **Open recent**, or start `grapht my.grapht`. File paths are stored
+  sort and the camera. **Open session** (Ctrl+O), **Open recent**, or start `graphsight my.graphsight`. File paths are stored
   both absolutely and relative to the session file, so a project folder can be moved. The data is re-read from the
   original files, so edits to the CSVs show up when you reopen the session.
 
@@ -144,9 +148,9 @@ edges, in/out degree, PageRank and the hierarchical layout all follow it.
 ## Headless export / scripting
 
 ```
-grapht --edges e.csv --nodes n.csv --layout group --group team --color team --size-by _degree \
+graphsight --edges e.csv --nodes n.csv --layout group --group team --color team --size-by _degree \
        --filter 'score > 3' --size 3840x2160 --export-png out.png --export-svg out.svg
-grapht --help
+graphsight --help
 ```
 
 ## Code map
@@ -170,10 +174,10 @@ grapht --help
 | `app.rs`, `panels.rs`, `canvas.rs`, `table.rs` | egui UI; the canvas draws nodes as textured quads and edges as meshes |
 | `theme.rs` | fonts, colours, spacing and small widgets (switch, segmented control) |
 | `dock.rs` | the dockable workspace: which panels exist, the default layout |
-| `project.rs`, `config.rs` | `.grapht` session files; per-user settings, recent files and saved panel layout |
+| `project.rs`, `config.rs` | `.graphsight` session files; per-user settings, recent files and saved panel layout |
 | `assets/readme` | the logo files shown at the top of this README |
 | `.github/workflows/release.yml` | tests, then builds the Windows exe, installer and zip and publishes a GitHub release when a `v*` tag is pushed |
-| `installer/grapht.iss` | the Windows installer (Inno Setup): Start menu entry, `.grapht` file type, uninstaller |
+| `installer/graphsight.iss` | the Windows installer (Inno Setup): Start menu entry, `.graphsight` file type, uninstaller |
 | `vendor/egui_dock` | the `egui_dock` docking crate (MIT), ported to egui 0.37 (one-line change) |
 
 `cargo test --release` runs the unit tests (130+), including headless UI tests that feed pointer, wheel and keyboard events

@@ -1,6 +1,6 @@
 //! The Windows 11 window material (Mica, Mica Alt, Acrylic) behind a see-through window.
 //!
-//! The material is drawn by the system behind the window; Grapht only has to leave the right pixels transparent
+//! The material is drawn by the system behind the window; Graphsight only has to leave the right pixels transparent
 //! (the translucency sliders in Settings). On other systems, and on Windows 10, this does nothing.
 
 use crate::theme::Backdrop;

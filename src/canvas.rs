@@ -345,7 +345,7 @@ impl App {
         let c = self.s.look.text_color();
         let tc = Color32::from_rgb(c[0], c[1], c[2]);
         let top = rect.center().y - 150.0;
-        painter.text(Pos2::new(rect.center().x, top), Align2::CENTER_CENTER, "Grapht", FontId::proportional(34.0), tc);
+        painter.text(Pos2::new(rect.center().x, top), Align2::CENTER_CENTER, "Graphsight", FontId::proportional(34.0), tc);
         painter.text(
             Pos2::new(rect.center().x, top + 42.0),
             Align2::CENTER_CENTER,

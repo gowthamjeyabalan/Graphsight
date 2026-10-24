@@ -279,7 +279,7 @@ pub enum ColData {
 pub struct Column {
     pub name: String,
     pub data: ColData,
-    /// Computed by Grapht (degree, pagerank …) rather than loaded from a file.
+    /// Computed by Graphsight (degree, pagerank …) rather than loaded from a file.
     pub is_metric: bool,
     /// Numeric column that is better treated as categories (component id, community id).
     pub hint_cat: bool,
