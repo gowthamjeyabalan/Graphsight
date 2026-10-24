@@ -60,6 +60,7 @@ Root: HKA; Subkey: "Software\Classes\Grapht.Session"; ValueType: string; ValueNa
 Root: HKA; Subkey: "Software\Classes\Grapht.Session\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\grapht.exe,0"; Tasks: association
 Root: HKA; Subkey: "Software\Classes\Grapht.Session\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\grapht.exe"" ""%1"""; Tasks: association
 ; "Open with" lists Grapht for its data files too
+Root: HKA; Subkey: "Software\Classes\Applications\grapht.exe"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\grapht.exe\SupportedTypes"; ValueType: string; ValueName: ".grapht"; ValueData: ""; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\grapht.exe\SupportedTypes"; ValueType: string; ValueName: ".csv"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\Applications\grapht.exe\SupportedTypes"; ValueType: string; ValueName: ".json"; ValueData: ""

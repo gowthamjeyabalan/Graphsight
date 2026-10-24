@@ -65,7 +65,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Move-Item dist/grapht-setup-x64.exe .
           foreach ($f in "grapht-setup-x64.exe", "grapht-windows-x64.zip") {
-            (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() + "  $f" | Out-File -Encoding ascii "$f.sha256"
+            # one line with a Unix line end, so `sha256sum -c` reads it too
+            [IO.File]::WriteAllText("$PWD/$f.sha256", (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() + "  $f`n")
           }
 
       - uses: actions/upload-artifact@v4
