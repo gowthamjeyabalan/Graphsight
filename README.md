@@ -14,9 +14,15 @@ Designed for graphs of roughly 1 000 – 10 000 nodes. Measured on a 2-core clou
 
 ## Download
 
-Ready-made Windows builds are on the repository's **Releases** page: download `grapht-windows-x64.zip`, unzip it
-and run `grapht.exe` (no install needed). Windows may show a SmartScreen warning for an unsigned app; choose
-*More info ▸ Run anyway*.
+Ready-made Windows builds are on the repository's **Releases** page:
+
+* **Installer** — `grapht-setup-x64.exe` installs Grapht for your user account (no admin rights needed; it can also
+  install for all users), adds it to the Start menu, optionally to the desktop, and makes `.grapht` session files
+  open in Grapht. Running a newer installer updates the installed copy; uninstall from *Settings ▸ Apps*.
+* **Portable** — `grapht-windows-x64.zip`: unzip it and run `grapht.exe` (no install needed).
+
+Windows may show a SmartScreen warning for an unsigned app; choose *More info ▸ Run anyway*. Each file has a
+`.sha256` checksum next to it.
 
 ## Build and run
 
@@ -166,7 +172,8 @@ grapht --help
 | `dock.rs` | the dockable workspace: which panels exist, the default layout |
 | `project.rs`, `config.rs` | `.grapht` session files; per-user settings, recent files and saved panel layout |
 | `assets/readme` | the logo files shown at the top of this README |
-| `.github/workflows/release.yml` | tests, then builds the Windows exe and publishes a GitHub release when a `v*` tag is pushed |
+| `.github/workflows/release.yml` | tests, then builds the Windows exe, installer and zip and publishes a GitHub release when a `v*` tag is pushed |
+| `installer/grapht.iss` | the Windows installer (Inno Setup): Start menu entry, `.grapht` file type, uninstaller |
 | `vendor/egui_dock` | the `egui_dock` docking crate (MIT), ported to egui 0.37 (one-line change) |
 
 `cargo test --release` runs the unit tests (130+), including headless UI tests that feed pointer, wheel and keyboard events
