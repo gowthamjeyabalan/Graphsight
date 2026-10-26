@@ -76,7 +76,15 @@ adjacency maps `{"a": ["b","c"]}`. Nested properties are flattened (`a.b`).
 
 **Colour / size** — colour by any column (categorical palette, or a gradient with optional log scale / 2–98 %
 clipping / invert; numeric columns can also be treated as categories). Size by any numeric column. Edges can be one
-colour, take the source node's colour, blend both ends, or be coloured by an edge attribute.
+colour, take the source node's colour, blend both ends' colours, or be coloured by **any attribute of the source or
+the target node** (computed ones too, e.g. `_community`), or by an **edge attribute**. Edges get their own legend.
+
+**Edge attributes from both ends** — *Appearance ▸ Edges ▸ Edge attributes from both ends* makes a new edge attribute
+from a node attribute at the two ends of every edge: the pair (`Design → Sales`), the pair either way round
+(`Design – Sales`), *same* / *different*, either end's value, or for numbers the difference (target − source), the
+difference ignoring the sign, sum, mean, smaller or larger value. The edges are coloured by it straight away, and it is
+listed under *Edge attribute* like the columns of the edges file. It is kept in the session and made again whenever the
+data is reloaded; the × next to it removes it.
 
 **Filtering** — combine any of: search box (id and text columns); per-attribute rules (numeric range, category
 checklist); a free-form expression; hand-hiding (select ▸ Hide / Isolate). Filtered-out nodes are hidden or dimmed.
@@ -159,6 +167,7 @@ graphsight --help
 |---|---|
 | `data.rs` | CSV/JSON readers, typed columns, column auto-detection |
 | `graph.rs` | graph construction, adjacency, metrics (PageRank, k-core, components, Louvain) |
+| `edgeattr.rs` | edge attributes made from the nodes at both ends (pair, same / different, difference …) |
 | `expr.rs` | filter expression parser/evaluator |
 | `changes.rs` | finds the connections where an attribute changes, with per-value counts |
 | `coords.rs` | node coordinates → positions, the 3D orbit camera (perspective / orthographic) and its projection |

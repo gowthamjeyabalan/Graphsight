@@ -10,6 +10,7 @@ mod prof;
 mod coords;
 mod data;
 mod dock;
+mod edgeattr;
 mod expr;
 mod graph;
 mod layout;

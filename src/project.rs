@@ -43,6 +43,8 @@ pub struct ProjectFile {
     pub edges: Option<SrcRef<EdgeMapping>>,
     pub nodes: Option<SrcRef<NodeMapping>>,
     pub look: Look,
+    /// Edge attributes made from both ends (recipes).
+    pub edge_attrs: Vec<crate::edgeattr::EdgeAttr>,
     pub layout: LayoutSettings,
     pub filter: FilterState,
     pub change: crate::changes::ChangeSettings,
@@ -72,6 +74,7 @@ impl Default for ProjectFile {
             edges: None,
             nodes: None,
             look: Look::default(),
+            edge_attrs: vec![],
             layout: LayoutSettings::default(),
             filter: FilterState::default(),
             change: Default::default(),
@@ -150,6 +153,7 @@ impl App {
             edges: s.edge_src.as_ref().map(|e| make_ref(e, base, edges_json)),
             nodes: s.node_src.as_ref().map(|nn| make_ref(nn, base, same_json)),
             look: s.look.clone(),
+            edge_attrs: s.edge_attrs.clone(),
             layout: s.layout.clone(),
             filter: s.filter.clone(),
             change: s.change.clone(),
@@ -219,6 +223,7 @@ impl App {
     }
 
     pub fn new_project(&mut self) {
+        self.s.edge_attrs.clear();
         self.s.clear_all();
         self.s.look = Look::default();
         self.s.layout = LayoutSettings::default();
@@ -318,6 +323,7 @@ impl App {
 
         // ── settings, then the graph ──
         self.s.look = pf.look.clone();
+        self.s.edge_attrs = pf.edge_attrs.clone();
         self.s.layout = pf.layout.clone();
         self.s.filter = pf.filter.clone();
         self.s.change = pf.change.clone();

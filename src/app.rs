@@ -92,6 +92,8 @@ pub struct App {
     pub sim_paused: bool,
     pub frame_ms: f32,
     pub prof: crate::prof::Prof,
+    /// The edge attribute being made in Appearance ▸ Edges.
+    pub edge_draft: crate::edgeattr::Draft,
 }
 
 fn make_disc(size: usize) -> egui::ColorImage {
@@ -191,6 +193,7 @@ impl App {
             applied_backdrop: None,
             workspaces: vec![],
             ws_dialog: None,
+            edge_draft: Default::default(),
             applied_dark: true,
             table: TableState { dirty: true, ..Default::default() },
             top_metric: Some("_pagerank".into()),
@@ -1899,6 +1902,65 @@ mod ui_tests {
         theme::set_translucency(&h.ctx, Translucency::OPAQUE);
         h.frames(2);
         assert_eq!(h.ctx.global_style().visuals.panel_fill, theme::DARK.bg);
+    }
+
+    #[test]
+    fn edges_coloured_by_a_node_attribute_and_by_an_attribute_made_from_both_ends() {
+        use crate::edgeattr::{Combine, EdgeAttr};
+        use crate::model::{EdgeColorMode, Legend};
+        let dir = std::env::temp_dir().join(format!("graphsight-edges-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("e.csv"), SAMPLE_EDGES).unwrap();
+        std::fs::write(dir.join("n.csv"), SAMPLE_NODES).unwrap();
+        let mut h = Harness::new();
+        h.app.load_path(dir.join("e.csv"), Some(PendKindHint::Edges));
+        h.app.load_path(dir.join("n.csv"), Some(PendKindHint::Nodes));
+        h.frames(3);
+        let ne = h.app.s.g.edges.len();
+        // the source node's group, in the colours the nodes get for it, counted per edge
+        h.app.s.look.color_by = Some("group".into());
+        h.app.s.look.edge_mode = EdgeColorMode::SourceAttr;
+        h.app.s.look.edge_node_by = Some("group".into());
+        h.app.restyle();
+        let st = &h.app.s.style;
+        let rgb = st.edge_rgb.as_ref().expect("edge colours");
+        for (e, &(s, _)) in h.app.s.g.edges.iter().enumerate().take(50) {
+            assert_eq!(rgb[e], st.node_rgb[s as usize]);
+        }
+        match &st.edge_legend {
+            Legend::Cat(items) => assert_eq!(items.iter().map(|i| i.2).sum::<usize>(), ne),
+            _ => panic!("a category legend for the edges"),
+        }
+        // an attribute made from both ends, used for the colours, kept in the session
+        h.app.s.add_edge_attr(EdgeAttr { name: "teams".into(), col: "group".into(), how: Combine::Pair }).unwrap();
+        assert!(h.app.s.add_edge_attr(EdgeAttr { name: "teams".into(), col: "group".into(), how: Combine::Same }).is_err(), "names are unique");
+        assert!(h.app.s.add_edge_attr(EdgeAttr { name: "x".into(), col: "group".into(), how: Combine::Sum }).is_err(), "sums need numbers");
+        h.app.s.add_edge_attr(EdgeAttr { name: "age gap".into(), col: "age".into(), how: Combine::AbsDiff }).unwrap();
+        h.app.s.look.edge_mode = EdgeColorMode::Attribute;
+        h.app.s.look.edge_by = Some("teams".into());
+        h.app.restyle();
+        assert!(matches!(h.app.s.style.edge_legend, Legend::Cat(_)));
+        // the Appearance panel (with the builder open) and the Legend draw
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Appearance);
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Legend);
+        h.app.dock = Some(dock);
+        h.frames(3);
+        assert!(h.last_texts.iter().any(|(t, _)| t == "Edge attributes from both ends"));
+        let file = dir.join("edges.graphsight");
+        h.app.save_project_to(&file).unwrap();
+        let mut h2 = Harness::new();
+        h2.app.open_project(&file);
+        assert!(h2.app.error.is_none(), "{:?}", h2.app.error);
+        assert_eq!(h2.app.s.edge_attrs.len(), 2);
+        assert_eq!(h2.app.s.g.edge_col("teams").unwrap().len(), ne);
+        assert!(h2.app.s.g.edge_col("age gap").unwrap().is_numeric());
+        assert_eq!(h2.app.s.look.edge_by.as_deref(), Some("teams"));
+        assert!(h2.app.s.style.edge_rgb.is_some());
+        // removing it stops colouring by it
+        h2.app.s.remove_edge_attr(0);
+        assert!(h2.app.s.g.edge_col("teams").is_none() && h2.app.s.look.edge_by.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

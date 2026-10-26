@@ -131,13 +131,24 @@ fn body(ui: &mut Ui, f: impl FnOnce(&mut Ui)) {
     f(ui)
 }
 
-fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) -> egui::InnerResponse<()> {
     ui.horizontal(|ui| {
         let lw = label_width(ui);
         label_cell(ui, label, lw);
         ui.spacing_mut().combo_width = (ui.available_width() - 12.0).max(90.0);
         add(ui);
-    });
+    })
+}
+
+fn edge_mode_name(m: EdgeColorMode) -> &'static str {
+    match m {
+        EdgeColorMode::Uniform => "Single colour",
+        EdgeColorMode::Source => "Source node's colour",
+        EdgeColorMode::Blend => "Blend of both ends' colours",
+        EdgeColorMode::SourceAttr => "Source node attribute",
+        EdgeColorMode::TargetAttr => "Target node attribute",
+        EdgeColorMode::Attribute => "Edge attribute",
+    }
 }
 
 impl App {
@@ -464,28 +475,51 @@ impl App {
             ui.add_space(4.0);
             crate::theme::heading(ui, "Edges");
             row(ui, "Colour", |ui| {
-                ComboBox::from_id_salt("edge_mode")
-                    .selected_text(match look.edge_mode {
-                        EdgeColorMode::Uniform => "Single colour",
-                        EdgeColorMode::Source => "Source node colour",
-                        EdgeColorMode::Blend => "Blend of both ends",
-                        EdgeColorMode::Attribute => "By edge attribute",
-                    })
-                    .show_ui(ui, |ui| {
-                        restyle |= ui.selectable_value(&mut look.edge_mode, EdgeColorMode::Uniform, "Single colour").changed();
-                        restyle |= ui.selectable_value(&mut look.edge_mode, EdgeColorMode::Source, "Source node colour").changed();
-                        restyle |= ui.selectable_value(&mut look.edge_mode, EdgeColorMode::Blend, "Blend of both ends").changed();
-                        if !self.s.g.edge_cols.is_empty() {
-                            restyle |= ui.selectable_value(&mut look.edge_mode, EdgeColorMode::Attribute, "By edge attribute").changed();
+                ComboBox::from_id_salt("edge_mode").selected_text(edge_mode_name(look.edge_mode)).show_ui(ui, |ui| {
+                    use EdgeColorMode::*;
+                    for m in [Uniform, Source, Blend, SourceAttr, TargetAttr, Attribute] {
+                        if m == Attribute && self.s.g.edge_cols.is_empty() {
+                            continue;
                         }
-                    });
-            });
-            if look.edge_mode == EdgeColorMode::Attribute {
-                row(ui, "Attribute", |ui| {
-                    let ecols: Vec<ColInfo> = self.s.g.edge_cols.iter().map(|c| ColInfo { name: c.name.clone(), numeric: c.is_numeric(), metric: false }).collect();
-                    restyle |= combo_col(ui, "edge_by", &mut look.edge_by, &ecols, false, "(none)");
+                        restyle |= ui.selectable_value(&mut look.edge_mode, m, edge_mode_name(m)).changed();
+                    }
                 });
+            });
+            let edge_col = match look.edge_mode {
+                EdgeColorMode::Attribute => {
+                    row(ui, "Attribute", |ui| {
+                        let ecols: Vec<ColInfo> = self.s.g.edge_cols.iter().map(|c| ColInfo { name: c.name.clone(), numeric: c.is_numeric(), metric: c.is_metric }).collect();
+                        restyle |= combo_col(ui, "edge_by", &mut look.edge_by, &ecols, false, "(none)");
+                    });
+                    look.edge_by.as_deref().and_then(|c| self.s.g.edge_col(c))
+                }
+                EdgeColorMode::SourceAttr | EdgeColorMode::TargetAttr => {
+                    row(ui, "Node attribute", |ui| {
+                        restyle |= combo_col(ui, "edge_node_by", &mut look.edge_node_by, cols, false, "(none)");
+                    });
+                    look.edge_node_by.as_deref().and_then(|c| self.s.g.node_col(c))
+                }
+                _ => None,
+            };
+            if let Some(col) = edge_col {
+                let numeric = col.is_numeric() && !col.hint_cat;
+                if numeric {
+                    restyle |= ui.switch(&mut look.edge_as_cat, "Treat values as categories").on_hover_text("For the edge colours").changed();
+                }
+                if numeric && !look.edge_as_cat {
+                    row(ui, "Palette", |ui| {
+                        ComboBox::from_id_salt("edge_palette").selected_text(look.palette.name()).show_ui(ui, |ui| {
+                            for p in Palette::ALL {
+                                restyle |= ui.selectable_value(&mut look.palette, p, p.name()).changed();
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text("Shared with the node colours");
+                }
             }
+            restyle |= self.edge_attr_builder(ui, cols);
+            let look = &mut self.s.look;
             slider(ui, &mut look.edge_alpha, 0.02..=1.0, "Opacity", true);
             slider(ui, &mut look.edge_width, 0.4..=5.0, "Width", false);
             if self.s.g.directed {
@@ -748,48 +782,139 @@ impl App {
         });
     }
 
-    pub fn legend(&mut self, ui: &mut Ui) {
-        match &self.s.style.legend {
-            Legend::None => {
-                ui.weak("Single colour");
+    /// Appearance ▸ Edges: make an edge attribute from the nodes at both ends. Returns true when the colours change.
+    fn edge_attr_builder(&mut self, ui: &mut Ui, cols: &[ColInfo]) -> bool {
+        use crate::edgeattr::{Combine, EdgeAttr};
+        let mut restyle = false;
+        CollapsingHeader::new("Edge attributes from both ends").id_salt("edge_attrs").default_open(!self.s.edge_attrs.is_empty()).show(ui, |ui| {
+            ui.label(theme::secondary("Make an edge attribute from the nodes at the two ends of every edge, then colour the edges by it."));
+            let d = &mut self.edge_draft;
+            let before = (d.col.clone(), d.how);
+            row(ui, "Node attribute", |ui| {
+                combo_col(ui, "edge_draft_col", &mut d.col, cols, false, "(choose)");
+            });
+            let numeric = d.col.as_deref().and_then(|c| self.s.g.node_col(c)).is_some_and(|c| c.is_numeric());
+            if d.how.numbers_only() && !numeric {
+                d.how = Combine::Pair;
             }
-            Legend::Cat(items) => {
-                egui::ScrollArea::vertical().id_salt("legend_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                    for (name, c, count) in items.iter().take(80) {
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                            ui.painter().circle_filled(r.center(), 5.5, egui::Color32::from_rgb(c[0], c[1], c[2]));
-                            ui.label(format!("{name}  ({count})"));
-                        });
-                    }
-                    if items.len() > 80 {
-                        ui.weak(format!("… {} more categories", items.len() - 80));
+            row(ui, "Make", |ui| {
+                ComboBox::from_id_salt("edge_draft_how").selected_text(d.how.label()).show_ui(ui, |ui| {
+                    for h in Combine::ANY.into_iter().chain(Combine::NUMBERS.into_iter().filter(|_| numeric)) {
+                        ui.selectable_value(&mut d.how, h, h.label());
                     }
                 });
+            });
+            // the suggested name follows the choices until it is typed over
+            let suggested = |c: &Option<String>, h: Combine| c.as_deref().map(|c| EdgeAttr::default_name(c, h)).unwrap_or_default();
+            if d.name.is_empty() || d.name == suggested(&before.0, before.1) {
+                d.name = suggested(&d.col, d.how);
             }
-            Legend::Continuous { name, lo, hi, palette, log, invert } => {
-                ui.label(name);
-                let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(220.0), 14.0), egui::Sense::hover());
-                let steps = 48;
-                for k in 0..steps {
-                    let t0 = k as f32 / steps as f32;
-                    let mut t = t0;
-                    if *log {
-                        t = log_curve(t);
+            if (d.col.clone(), d.how) != before {
+                d.error = None;
+            }
+            row(ui, "Name", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY));
+            });
+            let ready = d.col.is_some();
+            if ui.add_enabled(ready, egui::Button::new("Add edge attribute")).on_hover_text("Then the edges are coloured by it").clicked() {
+                let a = EdgeAttr { name: d.name.trim().to_string(), col: d.col.clone().unwrap_or_default(), how: d.how };
+                match self.s.add_edge_attr(a.clone()) {
+                    Ok(()) => {
+                        self.s.look.edge_mode = EdgeColorMode::Attribute;
+                        self.s.look.edge_by = Some(a.name);
+                        self.edge_draft = Default::default();
+                        restyle = true;
                     }
-                    if *invert {
-                        t = 1.0 - t;
-                    }
-                    let c = palette.color(t);
-                    let x0 = r.left() + r.width() * t0;
-                    let x1 = r.left() + r.width() * (k + 1) as f32 / steps as f32;
-                    ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(x0, r.top()), egui::pos2(x1 + 0.5, r.bottom())), 0.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+                    Err(e) => self.edge_draft.error = Some(e),
                 }
+            }
+            if let Some(e) = &self.edge_draft.error {
+                ui.colored_label(egui::Color32::from_rgb(235, 100, 90), e);
+            }
+            let mut remove = None;
+            for (i, a) in self.s.edge_attrs.iter().enumerate() {
+                let missing = self.s.g.node_col(&a.col).is_none();
                 ui.horizontal(|ui| {
-                    ui.weak(fmt_num(*lo));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.weak(fmt_num(*hi)));
+                    if ui.small_button("×").on_hover_text("Remove this edge attribute").clicked() {
+                        remove = Some(i);
+                    }
+                    ui.label(&a.name);
+                    ui.label(theme::secondary(if missing { format!("{} is not in this graph", a.col) } else { format!("{}: {}", a.col, a.how.short()) }));
                 });
             }
+            if let Some(i) = remove {
+                self.s.remove_edge_attr(i);
+                restyle = true;
+            }
+        });
+        restyle
+    }
+
+    pub fn legend(&mut self, ui: &mut Ui) {
+        let st = &self.s.style;
+        let edges = !matches!(st.edge_legend, Legend::None);
+        egui::ScrollArea::vertical().id_salt("legend_scroll").auto_shrink([false, false]).show(ui, |ui| {
+            if edges {
+                theme::heading(ui, "Nodes");
+            }
+            legend_body(ui, &st.legend, None);
+            if edges {
+                ui.add_space(6.0);
+                theme::heading(ui, "Edges");
+                legend_body(ui, &st.edge_legend, Some(&st.edge_legend_title));
+            }
+        });
+    }
+}
+
+/// One legend: a swatch per category (a dot for nodes, a short line for edges), or the colour scale.
+fn legend_body(ui: &mut Ui, legend: &Legend, edge_title: Option<&str>) {
+    match legend {
+        Legend::None => {
+            ui.weak("Single colour");
+        }
+        Legend::Cat(items) => {
+            if let Some(t) = edge_title {
+                ui.label(t);
+            }
+            for (name, c, count) in items.iter().take(80) {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    let col = egui::Color32::from_rgb(c[0], c[1], c[2]);
+                    if edge_title.is_some() {
+                        ui.painter().line_segment([r.left_center(), r.right_center()], egui::Stroke::new(3.0, col));
+                    } else {
+                        ui.painter().circle_filled(r.center(), 5.5, col);
+                    }
+                    ui.label(format!("{name}  ({count})"));
+                });
+            }
+            if items.len() > 80 {
+                ui.weak(format!("… {} more categories", items.len() - 80));
+            }
+        }
+        Legend::Continuous { name, lo, hi, palette, log, invert } => {
+            ui.label(edge_title.unwrap_or(name));
+            let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(220.0), 14.0), egui::Sense::hover());
+            let steps = 48;
+            for k in 0..steps {
+                let t0 = k as f32 / steps as f32;
+                let mut t = t0;
+                if *log {
+                    t = log_curve(t);
+                }
+                if *invert {
+                    t = 1.0 - t;
+                }
+                let c = palette.color(t);
+                let x0 = r.left() + r.width() * t0;
+                let x1 = r.left() + r.width() * (k + 1) as f32 / steps as f32;
+                ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(x0, r.top()), egui::pos2(x1 + 0.5, r.bottom())), 0.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+            }
+            ui.horizontal(|ui| {
+                ui.weak(fmt_num(*lo));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.weak(fmt_num(*hi)));
+            });
         }
     }
 }

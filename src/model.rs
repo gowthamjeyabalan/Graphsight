@@ -23,9 +23,15 @@ use std::path::Path;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum EdgeColorMode {
     Uniform,
+    /// The source node's colour.
     Source,
     Blend,
+    /// An edge column (from the file, or made from both ends).
     Attribute,
+    /// Any node column, taken from the source node.
+    SourceAttr,
+    /// Any node column, taken from the target node.
+    TargetAttr,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -58,6 +64,10 @@ pub struct Look {
     pub size_max: f32,
     pub edge_mode: EdgeColorMode,
     pub edge_by: Option<String>,
+    /// The node column for colouring edges by their source or target node.
+    pub edge_node_by: Option<String>,
+    /// Colour edges by a numeric column as categories.
+    pub edge_as_cat: bool,
     pub edge_alpha: f32,
     pub edge_width: f32,
     pub arrows: bool,
@@ -84,6 +94,8 @@ impl Default for Look {
             size_max: 3.5,
             edge_mode: EdgeColorMode::Uniform,
             edge_by: None,
+            edge_node_by: None,
+            edge_as_cat: false,
             edge_alpha: 0.35,
             edge_width: 1.0,
             arrows: true,
@@ -120,11 +132,14 @@ pub struct StyleCache {
     pub node_r: Vec<f32>,
     pub edge_rgb: Option<Vec<Rgb>>,
     pub legend: Legend,
+    /// What the edge colours mean, when they come from an attribute (counts are edges), and its title.
+    pub edge_legend: Legend,
+    pub edge_legend_title: String,
 }
 
 impl Default for StyleCache {
     fn default() -> Self {
-        StyleCache { node_rgb: vec![], node_r: vec![], edge_rgb: None, legend: Legend::None }
+        StyleCache { node_rgb: vec![], node_r: vec![], edge_rgb: None, legend: Legend::None, edge_legend: Legend::None, edge_legend_title: String::new() }
     }
 }
 
@@ -221,9 +236,39 @@ pub fn compute_style(g: &Graph, look: &Look) -> StyleCache {
                 })
                 .collect(),
         ),
-        EdgeColorMode::Attribute => look.edge_by.as_deref().and_then(|c| g.edge_col(c)).map(|c| color_column(c, false, look).0),
+        _ => None,
     };
-    StyleCache { node_rgb, node_r, edge_rgb, legend }
+    let (edge_rgb, edge_legend, edge_legend_title) = match look.edge_mode {
+        EdgeColorMode::Attribute => match look.edge_by.as_deref().and_then(|c| g.edge_col(c)) {
+            Some(col) => {
+                let (rgb, l) = color_column(col, look.edge_as_cat, look);
+                (Some(rgb), l, col.name.clone())
+            }
+            None => (None, Legend::None, String::new()),
+        },
+        EdgeColorMode::SourceAttr | EdgeColorMode::TargetAttr => match look.edge_node_by.as_deref().and_then(|c| g.node_col(c)) {
+            Some(col) => {
+                // the same colours the nodes would get from this column, taken from one end of each edge
+                let src = look.edge_mode == EdgeColorMode::SourceAttr;
+                let end = |&(s, t): &(u32, u32)| if src { s as usize } else { t as usize };
+                let (rgb, mut l) = color_column(col, look.edge_as_cat, look);
+                if let Legend::Cat(items) = &mut l {
+                    let codes = col.as_categories().0;
+                    items.iter_mut().for_each(|it| it.2 = 0);
+                    for e in &g.edges {
+                        if let Some(it) = items.get_mut(codes[end(e)] as usize) {
+                            it.2 += 1;
+                        }
+                    }
+                }
+                let title = format!("{} node: {}", if src { "Source" } else { "Target" }, col.name);
+                (Some(g.edges.iter().map(|e| rgb[end(e)]).collect()), l, title)
+            }
+            None => (None, Legend::None, String::new()),
+        },
+        _ => (edge_rgb, Legend::None, String::new()),
+    };
+    StyleCache { node_rgb, node_r, edge_rgb, legend, edge_legend, edge_legend_title }
 }
 
 // ───────────────────────────── filters ─────────────────────────────
@@ -373,6 +418,8 @@ pub struct Session {
     pub sel_edges: Vec<u32>,
     pub style: StyleCache,
     pub fit_requested: bool,
+    /// Edge attributes made from both ends (made again with every rebuild).
+    pub edge_attrs: Vec<crate::edgeattr::EdgeAttr>,
     anim: Option<Anim>,
 }
 
@@ -421,6 +468,7 @@ impl Default for Session {
             sel_edges: vec![],
             style: StyleCache::default(),
             fit_requested: false,
+            edge_attrs: vec![],
             anim: None,
         }
     }
@@ -494,6 +542,7 @@ impl Session {
         }
         let first_time = known * 2 < n;
         self.g = g;
+        crate::edgeattr::apply(&mut self.g, &self.edge_attrs);
         self.pos = pos;
         self.manual_hidden = vec![false; n];
         self.sel = vec![false; n];
@@ -523,6 +572,9 @@ impl Session {
             if self.g.edge_col(e).is_none() {
                 self.look.edge_by = None;
             }
+        }
+        if !has(&self.g, &self.look.edge_node_by) {
+            self.look.edge_node_by = None;
         }
         for c in [&mut self.layout.order_by, &mut self.layout.ring_by, &mut self.layout.group_by, &mut self.layout.x_by, &mut self.layout.y_by] {
             if c.as_ref().is_some_and(|name| self.g.node_col(name).is_none()) {
@@ -905,6 +957,33 @@ impl Session {
         self.style = compute_style(&self.g, &self.look);
     }
 
+    /// Make an edge attribute from both ends and keep its recipe.
+    pub fn add_edge_attr(&mut self, a: crate::edgeattr::EdgeAttr) -> Result<(), String> {
+        if a.name.trim().is_empty() {
+            return Err("Give the attribute a name.".into());
+        }
+        if self.g.edge_col(&a.name).is_some() {
+            return Err(format!("There is already an edge attribute called “{}”.", a.name));
+        }
+        let col = a.compute(&self.g).ok_or_else(|| format!("“{}” cannot be made from {}.", a.how.label(), a.col))?;
+        self.g.edge_cols.push(col);
+        self.edge_attrs.push(a);
+        Ok(())
+    }
+
+    /// Forget an edge attribute made from both ends (and stop colouring by it).
+    pub fn remove_edge_attr(&mut self, i: usize) {
+        if i >= self.edge_attrs.len() {
+            return;
+        }
+        let a = self.edge_attrs.remove(i);
+        self.g.edge_cols.retain(|c| !(c.is_metric && c.name == a.name));
+        if self.look.edge_by.as_deref() == Some(a.name.as_str()) {
+            self.look.edge_by = None;
+        }
+        self.recompute_style();
+    }
+
     // ── section box / section lines ──
 
     /// Number of axes the section works on: x and y in the flat view, x, y and z in 3D.
@@ -1206,6 +1285,9 @@ impl Session {
         }
         if self.look.edge_by.as_ref().is_some_and(|e| g.edge_col(e).is_none()) {
             self.look.edge_by = None;
+        }
+        if miss(&self.look.edge_node_by) {
+            self.look.edge_node_by = None;
         }
         for c in [&mut self.layout.order_by, &mut self.layout.ring_by, &mut self.layout.group_by, &mut self.layout.x_by, &mut self.layout.y_by] {
             if miss(c) {
