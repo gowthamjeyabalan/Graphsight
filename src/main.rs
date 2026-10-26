@@ -12,6 +12,7 @@ mod data;
 mod dock;
 mod edgeattr;
 mod expr;
+mod geometry;
 mod graph;
 mod layout;
 mod menus;

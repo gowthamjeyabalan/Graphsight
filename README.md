@@ -156,6 +156,19 @@ subgraph. *Cross-tab* mode counts the connections between every value of one att
 (up to 40 values each) as a shaded grid; click a cell to select the nodes at both ends. The query is saved in the
 session.
 
+**Geometry from OBJ (Revit elements)** — *File ▸ Load geometry (OBJ)…*, dropping an `.obj` file on the window, or the
+*Geometry* block under the coordinates in the *Layout* tab loads solids and draws them in the 3D coordinates view in the
+nodes' colours, shaded. Every named object in the file (`o name`, or `g name` when there are no objects) is one solid,
+and a node gets the solid whose name equals its value in the *Match by* column (the column with the most matches is
+picked for you, the node id included). One solid per element (names are element ids) and one solid shared by many
+nodes (names are family types) both work. *Place each solid*: **where it is** (the file is in model coordinates, the
+same as the X, Y and Z columns), **at its node** (a library of shapes around 0, 0, 0, with a size factor), or **in its
+box** (stretched to fill the node's bounding box). Solids too small on screen to matter are drawn as plain nodes. The
+file and its settings are kept in the session (found again next to the session file if it was moved).
+[`tools/revit/ExportGeometry.cs`](tools/revit/ExportGeometry.cs) is a Revit macro that writes such a file: light,
+triangulated solids of the elements picked by any parameter (workset, category, family, type, level …), named by
+their Id, UniqueId or any parameter, in metres with Z up — or one solid per family type for a library.
+
 **Node shapes** — *Appearance ▸ Node shape ▸ Shape by* gives each value of any node attribute its own shape: circle,
 square, triangle, triangle pointing down, diamond, pentagon, hexagon, star, plus and ring (after ten values the shapes
 repeat; missing values stay circles). Shape works together with colour and size, has its own key in the Legend and is
@@ -196,6 +209,7 @@ graphsight --help
 | `data.rs` | CSV/JSON readers, typed columns, column auto-detection |
 | `graph.rs` | graph construction, adjacency, metrics (PageRank, k-core, components, Louvain) |
 | `edgeattr.rs` | edge attributes made from the nodes at both ends (pair, same / different, difference …) |
+| `geometry.rs` | OBJ solids: reading, matching objects to nodes by name, placing and shading them in 3D |
 | `shapes.rs` | the ten node shapes: flat outlines, the solids for 3D, shading and drawing |
 | `presets.rs` | named presets of the appearance, edge attributes, filters and layout settings (`presets.json`) |
 | `expr.rs` | filter expression parser/evaluator |

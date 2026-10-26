@@ -1357,6 +1357,68 @@ fn fmt_num(v: f64) -> String {
 }
 
 impl App {
+    /// "Geometry" block in the Layout tab, shown while the 3D view is on: solids from an OBJ file, matched to nodes.
+    fn geometry_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
+        use crate::geometry::Place;
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        crate::theme::heading(ui, "Geometry");
+        let Some(lib) = self.s.geo.clone() else {
+            ui.weak("Draw each node as a real solid from an OBJ file (for example Revit elements exported with the macro in tools/revit). Each object in the file is matched to the node with the same value in a column you choose.");
+            if ui.button("Load geometry (OBJ)…").clicked() {
+                self.pick_geometry();
+            }
+            return;
+        };
+        let mut rematch = false;
+        let file = lib.path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label(theme::semibold(&file)).on_hover_text(lib.path.display().to_string());
+            ui.weak(format!("{} solids, {} triangles", lib.meshes.len(), lib.triangles));
+        });
+        ui.switch(&mut self.s.geo_set.show, "Show the solids");
+        let mut by = self.s.geo_set.match_by.clone();
+        row(ui, "Match by", |ui| {
+            let mut options = vec![ColInfo { name: "id".into(), numeric: false, metric: false }];
+            options.extend(cols.iter().filter(|c| !c.metric).cloned());
+            if combo_col(ui, "geo_match", &mut by, &options, false, "(choose)") {
+                rematch = true;
+            }
+        })
+        .response
+        .on_hover_text("The node column whose values are the object names in the file");
+        if rematch {
+            self.s.geo_set.match_by = by;
+            self.s.rematch_geometry();
+        }
+        let info = self.s.geo_info;
+        if info.nodes == 0 {
+            ui.colored_label(egui::Color32::from_rgb(235, 100, 90), "No node matches an object name in this column.");
+        } else {
+            ui.weak(format!("{} of {} nodes have a solid; {} of {} solids are used.", info.nodes, self.s.g.n(), info.used, lib.meshes.len()));
+        }
+        ui.add_space(2.0);
+        ui.label("Place each solid");
+        ui.segmented(&mut self.s.geo_set.place, &[(Place::Model, "Where it is"), (Place::AtNode, "At its node"), (Place::FillBox, "In its box")]);
+        ui.weak(match self.s.geo_set.place {
+            Place::Model => "The file's coordinates are model coordinates, in the same units as the X, Y and Z columns (one solid per element).",
+            Place::AtNode => "Each solid is drawn around its node (a library of shapes, such as one solid per family type).",
+            Place::FillBox => "Each solid is stretched to fill its node's bounding box (Show bounding boxes must be on; nodes without a box get it at their node).",
+        });
+        if self.s.geo_set.place == Place::AtNode {
+            slider(ui, &mut self.s.geo_set.size, 0.05..=20.0, "Size ×", true);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Load another file…").clicked() {
+                self.pick_geometry();
+            }
+            if ui.button("Remove").clicked() {
+                self.s.clear_geometry();
+            }
+        });
+    }
+
     /// "Bounding boxes" block in the Layout tab, shown while the 3D view is on.
     fn boxes_section(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
         use crate::boxes::BoxColor;
@@ -1549,6 +1611,7 @@ impl App {
                 });
                 ui.weak("Drag to orbit, middle- or right-drag (or Space + drag) to pan, scroll to zoom, double-click empty space or press F to fit. The buttons at the bottom of the graph zoom to the selection or a region.");
                 self.boxes_section(ui, cols);
+                self.geometry_section(ui, cols);
             }
             if self.s.coords.x.is_none() || self.s.coords.y.is_none() {
                 ui.weak("Choose the X and Y columns.");

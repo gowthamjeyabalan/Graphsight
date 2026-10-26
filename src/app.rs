@@ -274,11 +274,29 @@ impl App {
 
     // ── loading ──
 
+    /// Load solids from an OBJ file and say how many nodes they matched.
+    pub fn load_geometry(&mut self, path: &std::path::Path) {
+        match self.s.load_geometry(path) {
+            Ok(()) => self.restyle(),
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
+    pub fn pick_geometry(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().add_filter("OBJ geometry", &["obj"]).pick_file() {
+            self.load_geometry(&p);
+        }
+    }
+
     pub fn load_path(&mut self, path: PathBuf, hint: Option<PendKindHint>) {
         let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         if crate::project::is_session(&path) {
             self.open_project(&path);
+            return;
+        }
+        if ext == "obj" {
+            self.load_geometry(&path);
             return;
         }
         if ext == "json" || ext == "geojson" {
@@ -549,6 +567,10 @@ impl App {
                     if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
                         self.load_path(p, None);
                     }
+                }
+                if ui.button("Load geometry (OBJ)…").on_hover_text("Solids for the 3D view, matched to nodes by name (for example exported from Revit)").clicked() {
+                    ui.close();
+                    self.pick_geometry();
                 }
                 ui.separator();
                 if ui.button("Load sample dataset").clicked() {
@@ -2068,6 +2090,81 @@ mod ui_tests {
         odd.look.edge_width_by = Some(EdgeRef { end: End::Edge, col: "no such column".into() });
         h2.app.apply_preset(&odd);
         assert!(h2.app.s.look.edge_width_by.is_none() && h2.app.s.look.edge_dash_by.is_some());
+    }
+
+    #[test]
+    fn obj_solids_match_nodes_and_are_drawn_where_their_nodes_are() {
+        use crate::geometry::Place;
+        let dir = std::env::temp_dir().join(format!("graphsight-obj-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // four elements on a 10 m grid, each a 2 m cube around its point, named by its element id
+        let pts = [(1001, 0.0, 0.0, 0.0), (1002, 10.0, 0.0, 0.0), (1003, 10.0, 10.0, 3.0), (1004, 0.0, 10.0, 3.0)];
+        let mut nodes = String::from("id,ElementId,x,y,z,bbox_min_x,bbox_min_y,bbox_min_z,bbox_max_x,bbox_max_y,bbox_max_z\n");
+        let mut obj = String::from("# test\n");
+        let mut base = 1;
+        for (k, (eid, x, y, z)) in pts.iter().enumerate() {
+            nodes += &format!("n{k},{eid},{x},{y},{z},{},{},{},{},{},{}\n", x - 2.0, y - 2.0, z - 2.0, x + 2.0, y + 2.0, z + 2.0);
+            obj += &format!("o {eid}\n");
+            for c in 0..8 {
+                let d = |bit: i32| if c & bit != 0 { 1.0 } else { -1.0 };
+                obj += &format!("v {} {} {}\n", x + d(1), y + d(2), z + d(4));
+            }
+            for f in [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4], [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]] {
+                obj += &format!("f {} {} {} {}\n", base + f[0], base + f[1], base + f[2], base + f[3]);
+            }
+            base += 8;
+        }
+        obj += "o 9999\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"; // an element that is not in the graph
+        std::fs::write(dir.join("n.csv"), &nodes).unwrap();
+        std::fs::write(dir.join("e.csv"), "source,target\nn0,n1\nn1,n2\nn2,n3\n").unwrap();
+        std::fs::write(dir.join("model.obj"), &obj).unwrap();
+
+        let mut h = Harness::new();
+        h.app.load_path(dir.join("e.csv"), Some(PendKindHint::Edges));
+        h.app.load_path(dir.join("n.csv"), Some(PendKindHint::Nodes));
+        h.app.s.coords = crate::coords::CoordSettings { enabled: true, x: Some("x".into()), y: Some("y".into()), z: Some("z".into()), three_d: true, ..Default::default() };
+        h.app.s.apply_coords();
+        h.frames(3);
+        // dropping the file loads it; the column with the most matching names is found
+        h.app.load_path(dir.join("model.obj"), None);
+        assert!(h.app.error.is_none(), "{:?}", h.app.error);
+        assert_eq!(h.app.s.geo_set.match_by.as_deref(), Some("ElementId"));
+        assert_eq!((h.app.s.geo_info.nodes, h.app.s.geo_info.used), (4, 4));
+        h.frames(3);
+        // each node is drawn as its cube, around where the node is on screen
+        for n in h.app.draw.nodes.iter() {
+            assert!(!n.solid.is_empty(), "node {} has its solid", n.idx);
+            let xs: Vec<f32> = n.solid.iter().flat_map(|t| t.0.iter().map(|p| p[0])).collect();
+            let ys: Vec<f32> = n.solid.iter().flat_map(|t| t.0.iter().map(|p| p[1])).collect();
+            let mid = |v: &[f32]| (v.iter().cloned().fold(f32::INFINITY, f32::min) + v.iter().cloned().fold(f32::NEG_INFINITY, f32::max)) * 0.5;
+            // perspective moves the middle of the drawn cube a little off its centre: within a tenth of its size
+            let size = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max) - xs.iter().cloned().fold(f32::INFINITY, f32::min);
+            assert!((mid(&xs) - n.x).abs() < size * 0.1 && (mid(&ys) - n.y).abs() < size * 0.1, "solid of node {} sits on it", n.idx);
+        }
+        // at the node, and stretched into the boxes (twice the cube's size), both draw
+        h.app.s.geo_set.place = Place::AtNode;
+        h.frames(2);
+        assert!(h.app.draw.nodes.iter().all(|n| !n.solid.is_empty()));
+        let (min, max) = crate::boxes::guess_columns(&h.app.s.g);
+        h.app.s.boxes = crate::boxes::BoxSettings { enabled: true, min, max, ..Default::default() };
+        h.app.s.recompute_boxes();
+        h.app.s.geo_set.place = Place::FillBox;
+        h.frames(2);
+        assert!(h.app.draw.nodes.iter().all(|n| !n.solid.is_empty()));
+        // the Layout tab draws with the block in it (further down than the test window shows)
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Layout);
+        h.app.dock = Some(dock);
+        h.frames(2);
+        // a session keeps the file and the settings, and loads the solids again
+        let file = dir.join("with-geometry.graphsight");
+        h.app.save_project_to(&file).unwrap();
+        let mut h2 = Harness::new();
+        h2.app.open_project(&file);
+        assert!(h2.app.error.is_none(), "{:?}", h2.app.error);
+        assert_eq!(h2.app.s.geo_info.nodes, 4);
+        assert_eq!(h2.app.s.geo_set.place, Place::FillBox);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

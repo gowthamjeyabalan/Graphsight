@@ -550,6 +550,11 @@ pub struct Session {
     pub fit_requested: bool,
     /// Edge attributes made from both ends (made again with every rebuild).
     pub edge_attrs: Vec<crate::edgeattr::EdgeAttr>,
+    /// Solids from an OBJ file, the settings for them, which solid each node has, and how many matched.
+    pub geo: Option<crate::geometry::SharedLib>,
+    pub geo_set: crate::geometry::GeoSettings,
+    pub geo_node: Vec<Option<u32>>,
+    pub geo_info: crate::geometry::GeoInfo,
     anim: Option<Anim>,
 }
 
@@ -599,6 +604,10 @@ impl Default for Session {
             sel_edges: vec![],
             style: StyleCache::default(),
             fit_requested: false,
+            geo: None,
+            geo_set: Default::default(),
+            geo_node: vec![],
+            geo_info: Default::default(),
             edge_attrs: vec![],
             anim: None,
         }
@@ -674,6 +683,7 @@ impl Session {
         let first_time = known * 2 < n;
         self.g = g;
         crate::edgeattr::apply(&mut self.g, &self.edge_attrs);
+        self.rematch_geometry();
         self.pos = pos;
         self.manual_hidden = vec![false; n];
         self.sel = vec![false; n];
@@ -1097,6 +1107,45 @@ impl Session {
 
     pub fn recompute_style(&mut self) {
         self.style = compute_style(&self.g, &self.look);
+    }
+
+    /// Load solids from an OBJ file and match them to the nodes (by the chosen column, or the one that matches best).
+    pub fn load_geometry(&mut self, path: &Path) -> Result<()> {
+        let lib = crate::geometry::read_obj(path)?;
+        // keep the chosen column unless it matches nothing in a loaded graph (a session sets it before its graph is built)
+        let keep = match self.geo_set.match_by.as_deref() {
+            None => false,
+            Some(_) if self.g.n() == 0 => true,
+            Some(c) => (c == "id" || self.g.node_col(c).is_some()) && crate::geometry::match_nodes(&self.g, &lib, c).1.nodes > 0,
+        };
+        if !keep {
+            self.geo_set.match_by = crate::geometry::best_column(&self.g, &lib);
+        }
+        self.geo_set.path = Some(path.to_path_buf());
+        self.geo = Some(std::sync::Arc::new(lib));
+        self.rematch_geometry();
+        Ok(())
+    }
+
+    /// Work out again which solid each node has (after the data or the matching column changed).
+    pub fn rematch_geometry(&mut self) {
+        match (&self.geo, &self.geo_set.match_by) {
+            (Some(lib), Some(col)) => {
+                let (m, info) = crate::geometry::match_nodes(&self.g, lib, col);
+                self.geo_node = m;
+                self.geo_info = info;
+            }
+            _ => {
+                self.geo_node.clear();
+                self.geo_info = Default::default();
+            }
+        }
+    }
+
+    pub fn clear_geometry(&mut self) {
+        self.geo = None;
+        self.geo_set = Default::default();
+        self.rematch_geometry();
     }
 
     /// Forget edge settings whose attribute is gone.
@@ -1877,7 +1926,10 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         [l[0] / n, l[1] / n, l[2] / n]
     });
     // each node's box, when the shapes are to fill them
-    let fit: Option<Vec<Option<u32>>> = (orbit.is_some() && s.boxes.fit_shapes && s.boxes_shown()).then(|| {
+    let geo_fill = s.geo.is_some() && s.geo_set.show && s.geo_set.place == crate::geometry::Place::FillBox;
+    // triangles drawn from OBJ solids this frame: past this, nodes are drawn as plain nodes again
+    let mut geo_budget: usize = 1_500_000;
+    let fit: Option<Vec<Option<u32>>> = (orbit.is_some() && (s.boxes.fit_shapes || geo_fill) && s.boxes_shown()).then(|| {
         let mut m = vec![None; n];
         for (k, b) in s.box_items.iter().enumerate() {
             if let Some(slot) = m.get_mut(b.node as usize) {
@@ -1923,9 +1975,50 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         let shape = s.style.node_shape.as_ref().map_or(0, |v| v[i]);
         let rgba = [c[0], c[1], c[2], (alpha * 255.0) as u8];
         let mut solid = Vec::new();
-        if let (Some(o), Some(light)) = (orbit, light) {
+        // selected and highlighted solids take a tint, as they cannot carry a halo
+        let tint = |c: [u8; 4], t: Rgb, k: f32| [0, 1, 2].map(|j| (c[j] as f32 * (1.0 - k) + t[j] as f32 * k) as u8);
+        let solid_col = if s.sel[i] {
+            let t = tint(rgba, [10, 132, 255], 0.45);
+            [t[0], t[1], t[2], rgba[3]]
+        } else if ring {
+            let t = tint(rgba, CHANGE_COLOR, 0.5);
+            [t[0], t[1], t[2], rgba[3]]
+        } else {
+            rgba
+        };
+        // a solid from the OBJ file
+        if let (Some(o), Some(light), Some(lib), Some(xf), true) = (orbit, light, &s.geo, s.coords_xform, s.geo_set.show) {
+            if let Some(mesh) = s.geo_node.get(i).copied().flatten().and_then(|k| lib.meshes.get(k as usize)) {
+                use crate::geometry::Place;
+                // every placement is a scale and a shift per axis
+                let scale = [0, 1, 2].map(|a| xf.scale[a] as f32);
+                let model = ([0, 1, 2].map(|a| scale[a]), [0, 1, 2].map(|a| (-xf.mid[a] * xf.scale[a]) as f32));
+                let at_node = |k: f32| ([0, 1, 2].map(|a| scale[a] * k), s.pos3[i]);
+                let boxed = fit.as_ref().and_then(|m| m[i]).map(|k| &s.box_items[k as usize]);
+                let (mul, add) = match (s.geo_set.place, boxed) {
+                    (Place::Model, _) => model,
+                    (Place::FillBox, Some(b)) => {
+                        let mul = [0, 1, 2].map(|a| (b.hi[a] - b.lo[a]) / (mesh.hi[a] - mesh.lo[a]).max(1e-9));
+                        (mul, [0, 1, 2].map(|a| b.lo[a] - mesh.lo[a] * mul[a]))
+                    }
+                    _ => at_node(s.geo_set.size),
+                };
+                let place = |v: [f32; 3]| [0, 1, 2].map(|a| v[a] * mul[a] + add[a]);
+                // too small on screen to be worth its triangles: drawn as a plain node
+                let (lo, hi) = (place(mesh.lo), place(mesh.hi));
+                let centre = [0, 1, 2].map(|a| (lo[a] + hi[a]) * 0.5);
+                let reach = (0..3).map(|a| (hi[a] - lo[a]).abs()).fold(0.0f32, f32::max);
+                let px = o.project(centre).map_or(0.0, |(_, f, _)| reach * f);
+                if px >= 2.0 && mesh.tris.len() <= geo_budget {
+                    geo_budget -= mesh.tris.len();
+                    let proj3 = |q: [f32; 3]| o.project(q).map(|(v, _, d)| ([v.x, v.y], d));
+                    solid = crate::geometry::mesh_on_screen(mesh, place, proj3, o.eye, o.fwd, o.ortho, light, solid_col);
+                }
+            }
+        }
+        if let (Some(o), Some(light), true) = (orbit, light, solid.is_empty()) {
             let ns = crate::shapes::NodeShape::from_index(shape);
-            let boxed = fit.as_ref().and_then(|m| m[i]).map(|k| &s.box_items[k as usize]);
+            let boxed = fit.as_ref().and_then(|m| m[i]).map(|k| &s.box_items[k as usize]).filter(|_| s.boxes.fit_shapes);
             // a node shown at least a few pixels across is drawn solid; one that fills its box always is
             let placed = match boxed {
                 Some(b) => Some(crate::shapes::Placed {
@@ -1940,17 +2033,7 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
                 None => None,
             };
             if let Some(at) = placed {
-                // selected and highlighted solids take a tint, as they cannot carry a halo
-                let tint = |c: [u8; 4], t: Rgb, k: f32| [0, 1, 2].map(|j| (c[j] as f32 * (1.0 - k) + t[j] as f32 * k) as u8);
-                let col = if s.sel[i] {
-                    let t = tint(rgba, [10, 132, 255], 0.45);
-                    [t[0], t[1], t[2], rgba[3]]
-                } else if ring {
-                    let t = tint(rgba, CHANGE_COLOR, 0.5);
-                    [t[0], t[1], t[2], rgba[3]]
-                } else {
-                    rgba
-                };
+                let col = solid_col;
                 let proj3 = |q: [f32; 3]| o.project(q).map(|(v, _, d)| ([v.x, v.y], d));
                 solid = crate::shapes::solid_on_screen(ns, &at, proj3, o.eye, o.fwd, o.ortho, light, col).into_iter().map(|(t, c, _)| (t, c)).collect();
             }

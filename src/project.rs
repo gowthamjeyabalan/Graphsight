@@ -45,6 +45,8 @@ pub struct ProjectFile {
     pub look: Look,
     /// Edge attributes made from both ends (recipes).
     pub edge_attrs: Vec<crate::edgeattr::EdgeAttr>,
+    /// Solids from an OBJ file: the file and how they are matched and placed.
+    pub geometry: crate::geometry::GeoSettings,
     pub layout: LayoutSettings,
     pub filter: FilterState,
     pub change: crate::changes::ChangeSettings,
@@ -75,6 +77,7 @@ impl Default for ProjectFile {
             nodes: None,
             look: Look::default(),
             edge_attrs: vec![],
+            geometry: Default::default(),
             layout: LayoutSettings::default(),
             filter: FilterState::default(),
             change: Default::default(),
@@ -154,6 +157,7 @@ impl App {
             nodes: s.node_src.as_ref().map(|nn| make_ref(nn, base, same_json)),
             look: s.look.clone(),
             edge_attrs: s.edge_attrs.clone(),
+            geometry: s.geo_set.clone(),
             layout: s.layout.clone(),
             filter: s.filter.clone(),
             change: s.change.clone(),
@@ -224,6 +228,7 @@ impl App {
 
     pub fn new_project(&mut self) {
         self.s.edge_attrs.clear();
+        self.s.clear_geometry();
         self.s.clear_all();
         self.s.look = Look::default();
         self.s.layout = LayoutSettings::default();
@@ -333,6 +338,20 @@ impl App {
         self.s.coords = pf.coords.clone();
         self.s.boxes = pf.boxes.clone();
         self.s.section = pf.section.clone();
+        // the solids file: where it was, or next to the session file
+        self.s.clear_geometry();
+        if let Some(gp) = &pf.geometry.path {
+            let here = path.parent().map(|d| d.join(gp.file_name().unwrap_or_default()));
+            match [Some(gp.clone()), here].into_iter().flatten().find(|p| p.is_file()) {
+                Some(found) => {
+                    self.s.geo_set = pf.geometry.clone();
+                    if let Err(e) = self.s.load_geometry(&found) {
+                        warnings.push(format!("{e:#}"));
+                    }
+                }
+                None => warnings.push(format!("Geometry file not found: {}", gp.display())),
+            }
+        }
         self.rebuild();
         self.s.look = pf.look.clone();
         self.s.restore_state(&pf.positions, &pf.pinned, &pf.selected, &pf.hidden);
