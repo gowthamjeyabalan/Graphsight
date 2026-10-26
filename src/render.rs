@@ -117,7 +117,48 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
         let t = s.look.text_color();
         paint([t[0], t[1], t[2], 255])
     };
+    let ring_paint = ring.clone();
     for n in &dl.nodes {
+        if !n.solid.is_empty() {
+            for (t, c) in &n.solid {
+                let mut pb = PathBuilder::new();
+                pb.move_to(t[0][0], t[0][1]);
+                pb.line_to(t[1][0], t[1][1]);
+                pb.line_to(t[2][0], t[2][1]);
+                pb.close();
+                if let Some(path) = pb.finish() {
+                    // a hair of stroke closes the seams between the triangles
+                    pm.fill_path(&path, &paint(*c), FillRule::Winding, tf, None);
+                    pm.stroke_path(&path, &paint(*c), &Stroke { width: 0.35, ..Default::default() }, tf, None);
+                }
+            }
+            continue;
+        }
+        let shape = crate::shapes::NodeShape::from_index(n.shape);
+        if n.shape != 0 {
+            let mut pb = PathBuilder::new();
+            let ring = shape == crate::shapes::NodeShape::Ring;
+            let mut add = |pts: Vec<[f32; 2]>| {
+                pb.move_to(pts[0][0], pts[0][1]);
+                for p in &pts[1..] {
+                    pb.line_to(p[0], p[1]);
+                }
+                pb.close();
+            };
+            add(crate::shapes::outline_at(shape, [n.x, n.y], n.r));
+            if ring {
+                add(crate::shapes::outline_at(shape, [n.x, n.y], n.r * 0.55));
+            }
+            if let Some(path) = pb.finish() {
+                pm.fill_path(&path, &paint(n.rgba), if ring { FillRule::EvenOdd } else { FillRule::Winding }, tf, None);
+            }
+            if n.selected {
+                if let Some(ring_path) = PathBuilder::from_circle(n.x, n.y, n.r + 2.0) {
+                    pm.stroke_path(&ring_path, &ring_paint, &Stroke { width: 2.0, ..Default::default() }, tf, None);
+                }
+            }
+            continue;
+        }
         if let Some(path) = PathBuilder::from_circle(n.x, n.y, n.r) {
             pm.fill_path(&path, &paint(n.rgba), FillRule::Winding, tf, None);
             if n.selected {
@@ -185,18 +226,44 @@ pub fn render_svg(s: &Session, cam: &ViewCam, w: f32, h: f32) -> String {
     let t = s.look.text_color();
     let label_all = dl.nodes.len() <= 300;
     for n in &dl.nodes {
-        let _ = write!(
-            out,
-            r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" fill="rgb({},{},{})" fill-opacity="{:.2}""#,
-            n.x, n.y, n.r, n.rgba[0], n.rgba[1], n.rgba[2], n.rgba[3] as f32 / 255.0
-        );
-        if n.selected {
-            let _ = write!(out, r#" stroke="rgb({},{},{})" stroke-width="2""#, t[0], t[1], t[2]);
-        } else if n.ring {
-            let c = CHANGE_COLOR;
-            let _ = write!(out, r#" stroke="rgb({},{},{})" stroke-width="2""#, c[0], c[1], c[2]);
+        let fill = format!(r#"fill="rgb({},{},{})" fill-opacity="{:.2}""#, n.rgba[0], n.rgba[1], n.rgba[2], n.rgba[3] as f32 / 255.0);
+        let shape = crate::shapes::NodeShape::from_index(n.shape);
+        if !n.solid.is_empty() {
+            for (t, c) in &n.solid {
+                let _ = writeln!(
+                    out,
+                    r#"<polygon points="{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}" fill="rgb({},{},{})" fill-opacity="{:.2}" stroke="rgb({},{},{})" stroke-width="0.3"/>"#,
+                    t[0][0], t[0][1], t[1][0], t[1][1], t[2][0], t[2][1], c[0], c[1], c[2], c[3] as f32 / 255.0, c[0], c[1], c[2]
+                );
+            }
+        } else if n.shape != 0 {
+            let pts = |r: f32| crate::shapes::outline_at(shape, [n.x, n.y], r).iter().map(|p| format!("{:.1},{:.1}", p[0], p[1])).collect::<Vec<_>>().join(" ");
+            if shape == crate::shapes::NodeShape::Ring {
+                let ring = |r: f32| {
+                    let p = crate::shapes::outline_at(shape, [n.x, n.y], r);
+                    let mut d = format!("M{:.1},{:.1}", p[0][0], p[0][1]);
+                    for q in &p[1..] {
+                        d.push_str(&format!(" L{:.1},{:.1}", q[0], q[1]));
+                    }
+                    d + " Z"
+                };
+                let _ = write!(out, r#"<path d="{} {}" fill-rule="evenodd" {fill}"#, ring(n.r), ring(n.r * 0.55));
+            } else {
+                let _ = write!(out, r#"<polygon points="{}" {fill}"#, pts(n.r));
+            }
+        } else {
+            let _ = write!(out, r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" {fill}"#, n.x, n.y, n.r);
         }
-        out.push_str("/>\n");
+        // a flat shape or circle is still open: its selection or change outline, then the end of the tag
+        if n.solid.is_empty() {
+            if n.selected {
+                let _ = write!(out, r#" stroke="rgb({},{},{})" stroke-width="2""#, t[0], t[1], t[2]);
+            } else if n.ring {
+                let c = CHANGE_COLOR;
+                let _ = write!(out, r#" stroke="rgb({},{},{})" stroke-width="2""#, c[0], c[1], c[2]);
+            }
+            out.push_str("/>\n");
+        }
         if label_all || n.selected {
             let label = s.label_of(n.idx as usize).replace('&', "&amp;").replace('<', "&lt;");
             let _ = writeln!(

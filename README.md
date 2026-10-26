@@ -156,12 +156,22 @@ subgraph. *Cross-tab* mode counts the connections between every value of one att
 (up to 40 values each) as a shaded grid; click a cell to select the nodes at both ends. The query is saved in the
 session.
 
+**Node shapes** — *Appearance ▸ Node shape ▸ Shape by* gives each value of any node attribute its own shape: circle,
+square, triangle, triangle pointing down, diamond, pentagon, hexagon, star, plus and ring (after ten values the shapes
+repeat; missing values stay circles). Shape works together with colour and size, has its own key in the Legend and is
+kept in PNG and SVG exports. In the 3D coordinates view the shapes become lit solids that turn with the camera: sphere,
+cube, cone, cone pointing down, octahedron, pentagonal prism, hexagonal prism, star prism, 3D cross and torus (the
+prisms and the torus stand like coins facing you). Nodes only a few pixels across are drawn flat, so large graphs stay
+fast. Without *Shape by*, nodes are circles as before.
+
 **Bounding boxes** — while the 3D view is on, a *Bounding boxes* block appears under the coordinates. Choose the six
 numeric attributes that hold each node's box (minimum and maximum of X, Y and Z, in the same units as the
 coordinates; columns named like `bbox_min_x` or `xmin` are found for you) and switch *Show bounding boxes* on. Pick an
 attribute and tick its values to draw boxes only for those nodes, for example every `room` but no `hall`. Boxes can be
 one colour or take their node's colour (so *Colour by* in Appearance colours them too), with sliders for fill opacity,
-outline opacity and outline width, and a switch to hide the nodes and edges so only the boxes show. Boxes follow the
+outline opacity and outline width, and a switch to hide the nodes and edges so only the boxes show. With *Shapes
+fill their boxes* each node that has a box is drawn as its 3D shape stretched to fill that box (a cube becomes the box,
+a sphere the largest ellipsoid inside it); lower the fill opacity to see the shapes clearly. Boxes follow the
 filters and the selected node's box is highlighted. Boxes that lie far outside the nodes (placeholder values such as
 -9999, a site outline) are counted in the panel and ignored when the camera frames the view; a box much bigger than the
 view is drawn as an outline only. They are also drawn in PNG and SVG exports, and the settings are
@@ -186,6 +196,7 @@ graphsight --help
 | `data.rs` | CSV/JSON readers, typed columns, column auto-detection |
 | `graph.rs` | graph construction, adjacency, metrics (PageRank, k-core, components, Louvain) |
 | `edgeattr.rs` | edge attributes made from the nodes at both ends (pair, same / different, difference …) |
+| `shapes.rs` | the ten node shapes: flat outlines, the solids for 3D, shading and drawing |
 | `presets.rs` | named presets of the appearance, edge attributes, filters and layout settings (`presets.json`) |
 | `expr.rs` | filter expression parser/evaluator |
 | `changes.rs` | finds the connections where an attribute changes, with per-value counts |

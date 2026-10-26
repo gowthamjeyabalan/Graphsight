@@ -872,8 +872,22 @@ impl App {
             let (k, size) = if r < 4.5 { (0, 16.0) } else if r < 18.0 { (1, 64.0) } else { (2, 256.0) };
             (k, r * (size / 2.0) / (size / 2.0 - 1.5))
         };
+        // other shapes than circles, and (in 3D) shaded solids, far ones first
+        let mut flat = MeshSink::new(TextureId::default());
+        let mut solids = MeshSink::new(TextureId::default());
         for n in &self.draw.nodes {
             let pos = Pos2::new(n.x, n.y) + off;
+            if !n.solid.is_empty() {
+                solids.reserve(n.solid.len() * 3);
+                for (t, c) in &n.solid {
+                    let base = solids.cur.vertices.len() as u32;
+                    for p in t {
+                        solids.vert(Pos2::new(p[0], p[1]) + off, WHITE_UV, col(*c));
+                    }
+                    solids.tri(base, base + 1, base + 2);
+                }
+                continue;
+            }
             if n.selected {
                 let (k, half) = class_of(n.r + 3.0);
                 halos[k].quad_uv(pos, half, halo);
@@ -882,10 +896,16 @@ impl App {
                 let c = crate::model::CHANGE_COLOR;
                 halos[k].quad_uv(pos, half, Color32::from_rgb(c[0], c[1], c[2]));
             }
+            if n.shape != 0 {
+                let shape = crate::shapes::NodeShape::from_index(n.shape);
+                flat.reserve(crate::shapes::flat_vertices(shape));
+                crate::shapes::fill_flat(&mut flat.cur, shape, pos, n.r, col(n.rgba));
+                continue;
+            }
             let (k, half) = class_of(n.r);
             nodes[k].quad_uv(pos, half, col(n.rgba));
         }
-        for sink in halos.into_iter().chain(nodes) {
+        for sink in halos.into_iter().chain(nodes).chain([flat, solids]) {
             for m in sink.finish() {
                 painter.add(Shape::mesh(m));
             }

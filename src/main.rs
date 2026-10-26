@@ -24,6 +24,7 @@ mod toolbar;
 mod view;
 mod render;
 mod section;
+mod shapes;
 mod style;
 mod subgraph;
 mod table;

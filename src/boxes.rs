@@ -35,6 +35,8 @@ pub struct BoxSettings {
     pub line_width: f32,
     /// Draw the nodes and edges as well. Off shows the boxes alone.
     pub show_nodes: bool,
+    /// Each node with a box is drawn as its solid shape stretched to fill the box.
+    pub fit_shapes: bool,
 }
 
 impl Default for BoxSettings {
@@ -50,6 +52,7 @@ impl Default for BoxSettings {
             outline: 0.85,
             line_width: 1.4,
             show_nodes: true,
+            fit_shapes: false,
         }
     }
 }
@@ -443,6 +446,58 @@ mod tests {
         // an old session file without box settings still loads
         let old: BoxSettings = serde_json::from_str("{}").unwrap();
         assert!(!old.enabled && old.show_nodes);
+    }
+
+    #[test]
+    fn shapes_by_attribute_flat_in_2d_solid_in_3d_and_filling_their_boxes() {
+        use crate::model::{DrawList, Highlight, build_draw_list};
+        let draw = |s: &Session| {
+            let size = egui::Vec2::new(800.0, 600.0);
+            let none = vec![false; s.g.n()];
+            let mut dl = DrawList::default();
+            build_draw_list(s, &s.fit_camera(size), size, &Highlight { focus: &none, hood: &none, active: false }, &mut dl);
+            dl
+        };
+        let mut s = session();
+        s.look.node_size = 12.0;
+        s.look.shape_by = Some("kind".into());
+        s.recompute_style();
+        // 2D: "hall" and "room" get two different flat shapes, no solids
+        let dl = draw(&s);
+        let shapes: std::collections::HashSet<u8> = dl.nodes.iter().map(|n| n.shape).collect();
+        assert_eq!(shapes.len(), 2);
+        assert!(dl.nodes.iter().all(|n| n.solid.is_empty()));
+        assert_eq!(s.style.shape_legend.len(), 2);
+        let svg = crate::render::render_svg(&s, &s.fit_camera(egui::Vec2::new(800.0, 600.0)), 800.0, 600.0);
+        assert!(svg.contains("<polygon"), "a square is a polygon in the SVG");
+        // 3D: big enough nodes become shaded solids
+        on(&mut s);
+        s.fit_cam3();
+        s.recompute_style();
+        let dl = draw(&s);
+        assert!(dl.nodes.iter().any(|n| !n.solid.is_empty()), "solids in 3D");
+        let shades: std::collections::HashSet<[u8; 4]> = dl.nodes.iter().flat_map(|n| n.solid.iter().map(|t| t.1)).collect();
+        assert!(shades.len() > 3, "faces are lit differently");
+        // filling the boxes: a node's solid covers about as much screen as its box, a node without a box stays small
+        s.boxes = settings(&s);
+        s.boxes.fit_shapes = true;
+        s.look.node_size = 1.0;
+        s.recompute_boxes();
+        s.recompute_style();
+        let dl = draw(&s);
+        let extent = |n: &crate::model::DrawNode| {
+            let xs = n.solid.iter().flat_map(|t| t.0.iter().map(|p| p[0]));
+            let (lo, hi) = xs.fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)));
+            hi - lo
+        };
+        let by_id = |id: &str| dl.nodes.iter().find(|n| s.g.ids[n.idx as usize] == id).unwrap();
+        let (a, c, d) = (by_id("a"), by_id("c"), by_id("d"));
+        assert!(!a.solid.is_empty() && !c.solid.is_empty(), "boxed nodes are solids");
+        assert!(d.solid.is_empty(), "d has no box and is small: drawn flat");
+        let box_px = dl.boxes.iter().map(|b| b.polygons().flat_map(|p| p.iter().map(|q| q[0])).fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)))).map(|(lo, hi)| hi - lo).fold(0.0f32, f32::max);
+        assert!(extent(a).max(extent(c)) > box_px * 0.5, "a solid reaches across its box ({} vs {box_px})", extent(a).max(extent(c)));
+        let png = crate::render::render_png(&s, &s.fit_camera(egui::Vec2::new(400.0, 300.0)), 400, 300, 1.0);
+        assert!(png.is_some());
     }
 
     /// Many small boxes plus a few very large ones (a site, a floor slab): the small ones must still be drawn.

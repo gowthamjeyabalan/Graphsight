@@ -60,6 +60,8 @@ pub struct Look {
     pub robust: bool,
     pub node_color: Rgb,
     pub size_by: Option<String>,
+    /// One shape per category of this column (circles without it); solids in the 3D coordinates view.
+    pub shape_by: Option<String>,
     pub node_size: f32,
     pub size_min: f32,
     pub size_max: f32,
@@ -96,6 +98,7 @@ impl Default for Look {
             robust: false,
             node_color: [86, 156, 214],
             size_by: None,
+            shape_by: None,
             node_size: 4.0,
             size_min: 0.6,
             size_max: 3.5,
@@ -153,6 +156,10 @@ pub struct StyleCache {
     pub edge_dash: Option<Vec<u8>>,
     pub dash_legend: Vec<(String, u8, usize)>,
     pub dash_title: String,
+    /// Shape per node (an index into `NodeShape::ALL`), when shapes follow a column; the legend and its title.
+    pub node_shape: Option<Vec<u8>>,
+    pub shape_legend: Vec<(String, u8, usize)>,
+    pub shape_title: String,
 }
 
 impl Default for StyleCache {
@@ -169,6 +176,9 @@ impl Default for StyleCache {
             edge_dash: None,
             dash_legend: vec![],
             dash_title: String::new(),
+            node_shape: None,
+            shape_legend: vec![],
+            shape_title: String::new(),
         }
     }
 }
@@ -347,7 +357,44 @@ pub fn compute_style(g: &Graph, look: &Look) -> StyleCache {
         }
         None => (None, vec![], String::new()),
     };
-    StyleCache { node_rgb, node_r, edge_rgb, legend, edge_legend, edge_legend_title, edge_w, width_legend, edge_dash, dash_legend, dash_title }
+    // a shape per category (numbers count as categories); after ten they repeat, missing values stay circles
+    let (node_shape, shape_legend, shape_title) = match look.shape_by.as_deref().and_then(|c| g.node_col(c)) {
+        Some(col) => {
+            let k = crate::shapes::NodeShape::ALL.len();
+            let (codes, labels) = col.as_categories();
+            let mut counts = vec![0usize; labels.len()];
+            let v = codes
+                .iter()
+                .map(|&c| {
+                    if c == NULL_CODE {
+                        0
+                    } else {
+                        counts[c as usize] += 1;
+                        (c as usize % k) as u8
+                    }
+                })
+                .collect();
+            let legend = labels.into_iter().enumerate().map(|(i, l)| (l, (i % k) as u8, counts[i])).collect();
+            (Some(v), legend, col.name.clone())
+        }
+        None => (None, vec![], String::new()),
+    };
+    StyleCache {
+        node_rgb,
+        node_r,
+        edge_rgb,
+        legend,
+        edge_legend,
+        edge_legend_title,
+        edge_w,
+        width_legend,
+        edge_dash,
+        dash_legend,
+        dash_title,
+        node_shape,
+        shape_legend,
+        shape_title,
+    }
 }
 
 // ───────────────────────────── filters ─────────────────────────────
@@ -648,6 +695,9 @@ impl Session {
         }
         if !has(&self.g, &self.look.size_by) {
             self.look.size_by = None;
+        }
+        if !has(&self.g, &self.look.shape_by) {
+            self.look.shape_by = None;
         }
         if !has(&self.g, &self.look.label_by) {
             self.look.label_by = None;
@@ -1398,6 +1448,9 @@ impl Session {
         if miss(&self.look.size_by) {
             self.look.size_by = None;
         }
+        if miss(&self.look.shape_by) {
+            self.look.shape_by = None;
+        }
         if miss(&self.look.label_by) {
             self.look.label_by = None;
         }
@@ -1540,6 +1593,11 @@ pub struct DrawNode {
     /// Distance from the camera (3D only; 0 in 2D). Far nodes are drawn first.
     pub depth: f32,
     pub idx: u32,
+    /// Index into `NodeShape::ALL` (0 = circle).
+    pub shape: u8,
+    /// In 3D, a node big enough on screen (or filling its bounding box) is a shaded solid: its visible triangles,
+    /// far ones first. Empty: drawn flat.
+    pub solid: Vec<([[f32; 2]; 3], [u8; 4])>,
 }
 
 pub struct DrawEdge {
@@ -1811,6 +1869,23 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
 
     // nodes (faded first, then normal)
     let mut faded: Vec<DrawNode> = Vec::new();
+    // in 3D, solids: lit from the upper left, a little in front of the camera
+    let orbit = if let Projector::Orbit(o) = &proj { Some(*o) } else { None };
+    let light = orbit.map(|o| {
+        let l = [-o.fwd[0] * 0.55 + o.up[0] * 0.7 - o.right[0] * 0.45, -o.fwd[1] * 0.55 + o.up[1] * 0.7 - o.right[1] * 0.45, -o.fwd[2] * 0.55 + o.up[2] * 0.7 - o.right[2] * 0.45];
+        let n = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt().max(1e-6);
+        [l[0] / n, l[1] / n, l[2] / n]
+    });
+    // each node's box, when the shapes are to fill them
+    let fit: Option<Vec<Option<u32>>> = (orbit.is_some() && s.boxes.fit_shapes && s.boxes_shown()).then(|| {
+        let mut m = vec![None; n];
+        for (k, b) in s.box_items.iter().enumerate() {
+            if let Some(slot) = m.get_mut(b.node as usize) {
+                *slot = Some(k as u32);
+            }
+        }
+        m
+    });
     for i in 0..n {
         let visible = s.vis[i];
         if !shown(i) || (section_hide && out_of(i)) {
@@ -1845,7 +1920,42 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             alpha = alpha.min(0.1);
         }
         alpha *= depth_k(depth, 0.35);
-        let dn = DrawNode { x: p.x, y: p.y, r, rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], selected: s.sel[i], ring, depth, idx: i as u32 };
+        let shape = s.style.node_shape.as_ref().map_or(0, |v| v[i]);
+        let rgba = [c[0], c[1], c[2], (alpha * 255.0) as u8];
+        let mut solid = Vec::new();
+        if let (Some(o), Some(light)) = (orbit, light) {
+            let ns = crate::shapes::NodeShape::from_index(shape);
+            let boxed = fit.as_ref().and_then(|m| m[i]).map(|k| &s.box_items[k as usize]);
+            // a node shown at least a few pixels across is drawn solid; one that fills its box always is
+            let placed = match boxed {
+                Some(b) => Some(crate::shapes::Placed {
+                    centre: [(b.lo[0] + b.hi[0]) * 0.5, (b.lo[1] + b.hi[1]) * 0.5, (b.lo[2] + b.hi[2]) * 0.5],
+                    half: [((b.hi[0] - b.lo[0]) * 0.5).max(1e-6), ((b.hi[1] - b.lo[1]) * 0.5).max(1e-6), ((b.hi[2] - b.lo[2]) * 0.5).max(1e-6)],
+                }),
+                // without "Shape by", nodes stay flat circles as before
+                None if r >= 4.5 && s.style.node_shape.is_some() => {
+                    let w = r / pr[i].map_or(1.0, |q| q.1.max(1e-9));
+                    Some(crate::shapes::Placed { centre: s.pos3[i], half: [w, w * ns.depth(), w] })
+                }
+                None => None,
+            };
+            if let Some(at) = placed {
+                // selected and highlighted solids take a tint, as they cannot carry a halo
+                let tint = |c: [u8; 4], t: Rgb, k: f32| [0, 1, 2].map(|j| (c[j] as f32 * (1.0 - k) + t[j] as f32 * k) as u8);
+                let col = if s.sel[i] {
+                    let t = tint(rgba, [10, 132, 255], 0.45);
+                    [t[0], t[1], t[2], rgba[3]]
+                } else if ring {
+                    let t = tint(rgba, CHANGE_COLOR, 0.5);
+                    [t[0], t[1], t[2], rgba[3]]
+                } else {
+                    rgba
+                };
+                let proj3 = |q: [f32; 3]| o.project(q).map(|(v, _, d)| ([v.x, v.y], d));
+                solid = crate::shapes::solid_on_screen(ns, &at, proj3, o.eye, o.fwd, o.ortho, light, col).into_iter().map(|(t, c, _)| (t, c)).collect();
+            }
+        }
+        let dn = DrawNode { x: p.x, y: p.y, r, rgba, selected: s.sel[i], ring, depth, idx: i as u32, shape, solid };
         if alpha < 0.995 { faded.push(dn) } else { out.nodes.push(dn) }
     }
     if threed {

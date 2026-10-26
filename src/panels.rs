@@ -505,6 +505,13 @@ impl App {
                 restyle |= slider(ui, &mut look.size_max, 1.0..=8.0, "Largest ×", false);
             }
             ui.add_space(4.0);
+            crate::theme::heading(ui, "Node shape");
+            row(ui, "Shape by", |ui| {
+                restyle |= combo_col(ui, "shape_by", &mut look.shape_by, cols, false, "(circles)");
+            })
+            .response
+            .on_hover_text("One shape per value: circle, square, triangle, triangle pointing down, diamond, pentagon, hexagon, star, plus, ring. In the 3D coordinates view they become sphere, cube, cone, cone pointing down, octahedron, pentagonal and hexagonal prism, star prism, 3D cross and torus.");
+            ui.add_space(4.0);
             crate::theme::heading(ui, "Edges");
             row(ui, "Colour", |ui| {
                 ComboBox::from_id_salt("edge_mode").selected_text(edge_mode_name(look.edge_mode)).show_ui(ui, |ui| {
@@ -946,11 +953,31 @@ impl App {
         let st = &self.s.style;
         let colours = !matches!(st.edge_legend, Legend::None);
         let edges = colours || st.width_legend.is_some() || !st.dash_legend.is_empty();
+        let shapes = !st.shape_legend.is_empty();
+        let solid = self.s.is_3d();
         egui::ScrollArea::vertical().id_salt("legend_scroll").auto_shrink([false, false]).show(ui, |ui| {
-            if edges {
+            if edges || shapes {
                 theme::heading(ui, "Nodes");
             }
             legend_body(ui, &st.legend, None);
+            if shapes {
+                ui.add_space(4.0);
+                ui.label(format!("Shape: {}", st.shape_title));
+                let ink = ui.visuals().text_color();
+                for (name, k, count) in st.shape_legend.iter().take(40) {
+                    let shape = crate::shapes::NodeShape::from_index(*k);
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                        let mut mesh = egui::epaint::Mesh::default();
+                        crate::shapes::fill_flat(&mut mesh, shape, r.center(), 5.5, ink);
+                        ui.painter().add(egui::Shape::mesh(mesh));
+                        ui.label(format!("{name}  ({count})")).on_hover_text(if solid { shape.solid_name() } else { shape.name() });
+                    });
+                }
+                if st.shape_legend.len() > 40 {
+                    ui.weak(format!("… {} more (shapes repeat after ten)", st.shape_legend.len() - 40));
+                }
+            }
             if !edges {
                 return;
             }
@@ -1419,6 +1446,11 @@ impl App {
             if ui.switch(&mut self.s.boxes.show_nodes, "Show nodes and edges").on_hover_text("Off shows the boxes alone. Nodes cannot be clicked then; use the table to select.").changed() {
                 refit = true;
             }
+            ui.add_enabled_ui(self.s.boxes.show_nodes, |ui| {
+                ui.switch(&mut self.s.boxes.fit_shapes, "Shapes fill their boxes").on_hover_text(
+                    "Each node with a box is drawn as its 3D shape (Appearance ▸ Node shape; a sphere without one) stretched to fill the box. Lower the fill opacity above to see the shapes clearly.",
+                );
+            });
 
             let info = self.s.box_info;
             if self.s.boxes.has_columns() {
