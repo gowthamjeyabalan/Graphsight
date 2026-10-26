@@ -52,6 +52,9 @@ pub struct App {
     pub hi_key: (Option<usize>, u64, bool),
     pub hi_active: bool,
     pub hover: Option<usize>,
+    /// The edge under the pointer when no node is, and where the pointer and camera were when it was looked up.
+    pub hover_edge: Option<usize>,
+    pub hover_edge_at: Option<(Vec2, ViewCam)>,
     pub drag_node: Option<usize>,
     pub box_start: Option<Pos2>,
     /// The section line(s) being dragged in the flat view: `[x line, y line]`, each 0 = lower side, 1 = upper side.
@@ -83,11 +86,16 @@ pub struct App {
     pub applied_backdrop: Option<(crate::theme::Backdrop, bool, bool)>,
     /// The workspace templates the user saved (Window ▸ Workspaces).
     pub workspaces: Vec<crate::config::Workspace>,
+    /// Saved presets (Presets menu), and the name being typed for a new one.
+    pub presets: Vec<crate::presets::Preset>,
+    pub preset_name: String,
     /// The "save workspace" dialog: the name being typed.
     pub ws_dialog: Option<WsDialog>,
     /// Whether the interface was dark the last time the graph background was synced with it.
     pub applied_dark: bool,
     pub table: TableState,
+    /// The Edges table (same kind of state; `sort` names "source", "target" or an edge column).
+    pub etable: TableState,
     pub top_metric: Option<String>,
     pub sim_paused: bool,
     pub frame_ms: f32,
@@ -130,6 +138,7 @@ impl App {
         crate::config::move_old_settings();
         app.settings = crate::config::Settings::load();
         app.workspaces = crate::config::load_workspaces();
+        app.presets = crate::presets::load();
         crate::theme::set_mode(&cc.egui_ctx, app.settings.theme);
         crate::theme::set_translucency(&cc.egui_ctx, app.translucency());
         cc.egui_ctx.set_zoom_factor(app.settings.ui_scale.clamp(0.6, 2.0));
@@ -169,6 +178,8 @@ impl App {
             hood: vec![],
             hi_key: (None, u64::MAX, false),
             hi_active: false,
+            hover_edge: None,
+            hover_edge_at: None,
             hover: None,
             drag_node: None,
             box_start: None,
@@ -191,11 +202,14 @@ impl App {
             maximized: false,
             ws_name: String::new(),
             applied_backdrop: None,
+            presets: vec![],
+            preset_name: String::new(),
             workspaces: vec![],
             ws_dialog: None,
             edge_draft: Default::default(),
             applied_dark: true,
             table: TableState { dirty: true, ..Default::default() },
+            etable: TableState { dirty: true, ..Default::default() },
             top_metric: Some("_pagerank".into()),
             sim_paused: false,
             frame_ms: 0.0,
@@ -231,8 +245,11 @@ impl App {
 
     pub fn after_graph_change(&mut self) {
         self.table.dirty = true;
+        self.etable.dirty = true;
         self.hi_key = (None, u64::MAX, false);
         self.hover = None;
+        self.hover_edge = None;
+        self.hover_edge_at = None;
         self.drag_node = None;
         self.auto_fit = true;
         self.view.anim = None;
@@ -243,6 +260,7 @@ impl App {
     pub fn refilter(&mut self) {
         self.s.recompute_visibility();
         self.table.dirty = true;
+        self.etable.dirty = true;
     }
 
     pub fn restyle(&mut self) {
@@ -597,6 +615,7 @@ impl App {
                     self.run_tool(crate::view::Tool::Home);
                 }
             });
+            self.presets_menu(ui);
             self.window_menu(ui);
             self.settings_button(ui);
             ui.menu_button("Help", |ui| {
@@ -1961,6 +1980,94 @@ mod ui_tests {
         h2.app.s.remove_edge_attr(0);
         assert!(h2.app.s.g.edge_col("teams").is_none() && h2.app.s.look.edge_by.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edge_rules_widths_line_styles_edge_table_hover_and_presets() {
+        use crate::edgeattr::{End, EdgeRef};
+        use crate::model::{Rule, RuleKind};
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(5);
+        let ne = h.app.s.g.edges.len();
+        assert_eq!(h.app.s.n_vis_edges, ne);
+
+        // an edge rule: only "family" edges pass; with Hide the others are not drawn at all
+        let kind = h.app.s.g.edge_col("kind").expect("the sample has an edge kind");
+        let (codes, labels) = kind.as_categories();
+        let fam = labels.iter().position(|l| l == "family").unwrap();
+        let mut allowed = vec![false; labels.len() + 1];
+        allowed[fam] = true;
+        let n_family = codes.iter().filter(|&&c| c as usize == fam).count();
+        h.app.s.filter.edge_rules.push(Rule { enabled: true, col: "kind".into(), kind: RuleKind::Cats { allowed } });
+        h.app.refilter();
+        assert_eq!(h.app.s.n_vis_edges, n_family);
+        assert_eq!(h.app.s.n_vis, h.app.s.g.n(), "edge rules leave the nodes alone");
+
+        // width by a number, line style by a category, both reach the draw list
+        h.app.s.look.edge_width_by = Some(EdgeRef { end: End::Edge, col: "weight".into() });
+        h.app.s.look.edge_dash_by = Some(EdgeRef { end: End::Source, col: "group".into() });
+        h.app.s.look.filtered = crate::model::FilteredMode::Hide;
+        h.app.restyle();
+        h.frames(3);
+        let st = &h.app.s.style;
+        let w = st.edge_w.as_ref().unwrap();
+        assert!(w.iter().all(|&x| (h.app.s.look.edge_wmin - 1e-4..=h.app.s.look.edge_wmax + 1e-4).contains(&x)));
+        assert!(w.iter().any(|&x| x > 1.5) && w.iter().any(|&x| x < 1.0));
+        assert!(st.dash_legend.len() >= 2 && st.edge_dash.as_ref().unwrap().iter().any(|&d| d > 0));
+        let drawn = h.app.draw.edges.len() + h.app.draw.edges_back.len();
+        assert!(drawn > 0 && drawn <= n_family, "filtered edges are hidden ({drawn} drawn, {n_family} pass)");
+        assert!(h.app.draw.edges.iter().any(|e| e.dash > 0) && h.app.draw.edges.iter().any(|e| (e.w - 1.0).abs() > 0.01));
+        let svg = crate::render::render_svg(&h.app.s, &h.app.cam, 800.0, 600.0);
+        assert!(svg.contains("stroke-dasharray"));
+        assert!(crate::render::render_png(&h.app.s, &h.app.cam, 320, 240, 1.0).is_some());
+
+        // the Edges table lists exactly the edges on show, and a row click selects that edge
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::EdgeTable);
+        h.app.dock = Some(dock);
+        h.frames(3);
+        assert_eq!(h.app.etable.order.len(), n_family);
+        h.app.etable.sort = Some(("weight".into(), false));
+        h.app.etable.dirty = true;
+        h.frames(2);
+        let wcol = h.app.s.g.edge_col("weight").unwrap();
+        let first = h.app.etable.order[0] as usize;
+        assert!(h.app.etable.order.iter().all(|&e| wcol.num(e as usize) <= wcol.num(first)));
+        // one edge selected: the Inspector shows it
+        h.app.s.select_only_edge(first);
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Inspector);
+        h.app.dock = Some(dock);
+        h.frames(2);
+        assert!(h.last_texts.iter().any(|(t, _)| t == "weight"));
+
+        // hovering an edge (no node there) finds it
+        let (a, b) = h.app.s.g.edges[first];
+        let proj = h.app.s.projector(&h.app.cam, h.app.canvas_size);
+        let (pa, pb) = (proj.at(&h.app.s, a as usize).unwrap().0, proj.at(&h.app.s, b as usize).unwrap().0);
+        let found = (1..20).map(|k| pa + (pb - pa) * (k as f32 / 20.0)).find_map(|p| {
+            (crate::model::pick_node(&h.app.s, &h.app.cam, h.app.canvas_size, p).is_none()).then(|| crate::model::pick_edge(&h.app.s, &h.app.cam, h.app.canvas_size, p)).flatten()
+        });
+        assert!(found.is_some(), "an edge can be found under the pointer");
+
+        // a preset keeps all of it and puts it back on a fresh graph
+        let p = h.app.current_preset("family weights");
+        let mut h2 = Harness::new();
+        h2.app.load_sample();
+        h2.frames(3);
+        h2.app.apply_preset(&p);
+        h2.frames(2);
+        assert_eq!(h2.app.s.n_vis_edges, n_family);
+        assert_eq!(h2.app.s.look.edge_dash_by, h.app.s.look.edge_dash_by);
+        assert!(h2.app.s.style.edge_w.is_some());
+        let back: crate::presets::Preset = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.filter.edge_rules.len(), 1);
+        // and a preset from a graph without these columns only drops what does not fit
+        let mut odd = p.clone();
+        odd.look.edge_width_by = Some(EdgeRef { end: End::Edge, col: "no such column".into() });
+        h2.app.apply_preset(&odd);
+        assert!(h2.app.s.look.edge_width_by.is_none() && h2.app.s.look.edge_dash_by.is_some());
     }
 
     #[test]

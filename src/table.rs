@@ -1,4 +1,4 @@
-//! Sortable node table (virtualised: only the visible rows are laid out).
+//! Sortable node and edge tables (virtualised: only the visible rows are laid out).
 
 use crate::app::*;
 use crate::data::natural_cmp;
@@ -243,4 +243,209 @@ impl App {
 
 fn ui_modifiers(resp: &egui::Response) -> bool {
     resp.ctx.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.shift)
+}
+
+// ───────────────────────── edges table ─────────────────────────
+
+impl App {
+    /// The edges that are on show (both ends visible, passing the edge rules), in the chosen order.
+    fn rebuild_edge_table_order(&mut self) {
+        let s = &self.s;
+        let g = &s.g;
+        let shown = |e: usize| {
+            let (a, b) = g.edges[e];
+            s.vis[a as usize] && s.vis[b as usize] && s.edge_passes(e)
+        };
+        let mut order: Vec<u32> = (0..g.edges.len()).filter(|&e| shown(e)).map(|e| e as u32).collect();
+        if let Some((name, asc)) = &self.etable.sort {
+            let end = match name.as_str() {
+                "source" => Some(0),
+                "target" => Some(1),
+                _ => None,
+            };
+            if let Some(k) = end {
+                let id = |e: u32| {
+                    let (a, b) = g.edges[e as usize];
+                    &g.ids[if k == 0 { a } else { b } as usize]
+                };
+                order.sort_by(|&x, &y| natural_cmp(id(x), id(y)));
+                if !*asc {
+                    order.reverse();
+                }
+            } else if let Some(c) = g.edge_col(name) {
+                order.sort_by(|&a, &b| {
+                    let missing = |i: u32| c.num(i as usize).is_none() && c.code(i as usize).is_none();
+                    match (missing(a), missing(b)) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => {
+                            let o = c.cmp_rows(a as usize, b as usize);
+                            if *asc { o } else { o.reverse() }
+                        }
+                    }
+                });
+            }
+        }
+        self.etable.order = order;
+        self.etable.dirty = false;
+    }
+
+    pub fn edge_table_panel(&mut self, ui: &mut Ui) {
+        if self.etable.dirty || self.etable.order.len() > self.s.g.edges.len() {
+            self.rebuild_edge_table_order();
+        }
+        {
+            let have: Vec<&str> = self.s.g.edge_cols.iter().map(|c| c.name.as_str()).collect();
+            self.etable.hidden.retain(|h| have.contains(&h.as_str()));
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Edges ({})", self.etable.order.len())).strong());
+            match &self.etable.sort {
+                Some((c, asc)) => {
+                    ui.weak(format!("sorted by {} {}", c, if *asc { "▲" } else { "▼" }));
+                    if ui.small_button("clear sort").clicked() {
+                        self.etable.sort = None;
+                        self.etable.dirty = true;
+                    }
+                }
+                None => {
+                    ui.weak("click a column header to sort, a row to select the edge");
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let n_hidden = self.etable.hidden.len();
+                let label = if n_hidden > 0 { format!("Columns ({n_hidden} hidden) ▾") } else { "Columns ▾".to_string() };
+                let names: Vec<String> = self.s.g.edge_cols.iter().map(|c| c.name.clone()).collect();
+                ui.menu_button(label, |ui| {
+                    ui.set_min_width(190.0);
+                    if ui.add_enabled(n_hidden > 0, egui::Button::new("Show all")).clicked() {
+                        self.etable.hidden.clear();
+                    }
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for name in &names {
+                            let mut on = !self.etable.hidden.contains(name);
+                            if ui.checkbox(&mut on, name).changed() {
+                                if on {
+                                    self.etable.hidden.retain(|h| h != name);
+                                } else {
+                                    self.etable.hidden.push(name.clone());
+                                }
+                            }
+                        }
+                    });
+                });
+                if ui.small_button("Select all listed").clicked() {
+                    self.s.clear_selection();
+                    for &e in &self.etable.order {
+                        self.s.set_edge_selected(e as usize, true);
+                    }
+                }
+            });
+        });
+        if self.s.g.edges.is_empty() {
+            return;
+        }
+        let shown_cols: Vec<usize> = (0..self.s.g.edge_cols.len()).filter(|&k| !self.etable.hidden.contains(&self.s.g.edge_cols[k].name)).collect();
+        let mut clicked_header: Option<String> = None;
+        let mut hide_now: Option<String> = None;
+        let mut clicked_row: Option<(usize, bool)> = None;
+        let mut dbl_row: Option<usize> = None;
+        let order = std::mem::take(&mut self.etable.order);
+        let sort = self.etable.sort.clone();
+        let base = self.s.look.edge_base();
+        let selected: std::collections::HashSet<u32> = self.s.sel_edges.iter().copied().collect();
+
+        egui::ScrollArea::horizontal().id_salt("edge_table_h").auto_shrink([false, false]).show(ui, |ui| {
+            let mut tb = TableBuilder::new(ui).id_salt("edge_table").striped(true).resizable(true).sense(Sense::click()).cell_layout(Layout::left_to_right(Align::Center)).vscroll(true);
+            tb = tb.column(TCol::initial(120.0).at_least(60.0).clip(true)).column(TCol::initial(110.0).at_least(60.0).clip(true));
+            for _ in &shown_cols {
+                tb = tb.column(TCol::initial(95.0).at_least(40.0).clip(true));
+            }
+            tb.header(20.0, |mut header| {
+                let mut names = vec!["source".to_string(), "target".to_string()];
+                names.extend(shown_cols.iter().map(|&k| self.s.g.edge_cols[k].name.clone()));
+                for name in names {
+                    header.col(|ui| {
+                        let arrow = match &sort {
+                            Some((c, asc)) if *c == name => {
+                                if *asc { " ▲" } else { " ▼" }
+                            }
+                            _ => "",
+                        };
+                        let resp = ui.add(egui::Label::new(RichText::new(format!("{name}{arrow}")).strong()).sense(Sense::click()));
+                        if resp.clicked() {
+                            clicked_header = Some(name.clone());
+                        }
+                        if name != "source" && name != "target" {
+                            resp.context_menu(|ui| {
+                                if ui.button(format!("Hide “{name}”")).clicked() {
+                                    hide_now = Some(name.clone());
+                                    ui.close();
+                                }
+                            });
+                        }
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(18.0, order.len(), |mut row| {
+                    let e = order[row.index()] as usize;
+                    let (a, b) = self.s.g.edges[e];
+                    row.set_selected(selected.contains(&(e as u32)));
+                    row.col(|ui| {
+                        let c = self.s.style.edge_rgb.as_ref().map_or(base, |v| v[e]);
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 10.0), Sense::hover());
+                        ui.painter().line_segment([r.left_center(), r.right_center()], egui::Stroke::new(2.5, Color32::from_rgb(c[0], c[1], c[2])));
+                        ui.label(&self.s.g.ids[a as usize]);
+                    });
+                    row.col(|ui| {
+                        ui.label(&self.s.g.ids[b as usize]);
+                    });
+                    for &k in &shown_cols {
+                        let c = &self.s.g.edge_cols[k];
+                        row.col(|ui| match c.label_at(e) {
+                            Some(l) => {
+                                ui.label(l);
+                            }
+                            None => {
+                                ui.weak("—");
+                            }
+                        });
+                    }
+                    let resp = row.response();
+                    if resp.double_clicked() {
+                        dbl_row = Some(e);
+                    } else if resp.clicked() {
+                        clicked_row = Some((e, ui_modifiers(&resp)));
+                    }
+                });
+            });
+        });
+        self.etable.order = order;
+
+        if let Some(name) = hide_now {
+            self.etable.hidden.push(name);
+        }
+        if let Some(name) = clicked_header {
+            self.etable.sort = match &self.etable.sort {
+                Some((c, true)) if *c == name => Some((name, false)),
+                Some((c, false)) if *c == name => None,
+                _ => Some((name, true)),
+            };
+            self.etable.dirty = true;
+        }
+        if let Some((e, additive)) = clicked_row {
+            if additive {
+                self.s.toggle_edge_selected(e);
+            } else {
+                self.s.select_only_edge(e);
+            }
+        }
+        if let Some(e) = dbl_row {
+            self.s.select_only_edge(e);
+            self.run_tool(crate::view::Tool::Selection);
+        }
+    }
 }

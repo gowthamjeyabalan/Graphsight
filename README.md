@@ -77,7 +77,11 @@ adjacency maps `{"a": ["b","c"]}`. Nested properties are flattened (`a.b`).
 **Colour / size** — colour by any column (categorical palette, or a gradient with optional log scale / 2–98 %
 clipping / invert; numeric columns can also be treated as categories). Size by any numeric column. Edges can be one
 colour, take the source node's colour, blend both ends' colours, or be coloured by **any attribute of the source or
-the target node** (computed ones too, e.g. `_community`), or by an **edge attribute**. Edges get their own legend.
+the target node** (computed ones too, e.g. `_community`), or by an **edge attribute**. Beyond colour, **Width by**
+makes edges thicker by any edge attribute or source / target node attribute (numbers scale between a thinnest and
+thickest width, categories step through them), and **Line style by** gives each category its own pattern (solid,
+dashed, dotted, long dashes, dash-dot, fine dashes). Edge colours, widths and line styles get their own legend, and
+they are kept in PNG and SVG exports.
 
 **Edge attributes from both ends** — *Appearance ▸ Edges ▸ Edge attributes from both ends* makes a new edge attribute
 from a node attribute at the two ends of every edge: the pair (`Design → Sales`), the pair either way round
@@ -88,6 +92,9 @@ data is reloaded; the × next to it removes it.
 
 **Filtering** — combine any of: search box (id and text columns); per-attribute rules (numeric range, category
 checklist); a free-form expression; hand-hiding (select ▸ Hide / Isolate). Filtered-out nodes are hidden or dimmed.
+**Edge rules** (*Filter ▸ Edges ▸ Add edge rule*) do the same for edges: a range or ticked categories of any edge
+attribute, including the ones made from both ends. Edges that fail a rule are hidden or dimmed like filtered-out nodes;
+the nodes stay.
 
 **Subgraph** — the *Subgraph* tab has two tools. *Show a subgraph* keeps only the nodes that match an attribute
 (a numeric range or ticked categories), optionally with their neighbours 1–3 steps out, lays them out again and
@@ -124,6 +131,17 @@ selection has been cleared) bring the panels back.
 
 **Nodes table columns** — right-click a column header to hide it, Ctrl+click headers to pick several, or use the
 *Columns* button above the table to tick columns on and off, hide the picked ones and *Show all* again.
+
+**Edges table and edge details** — the *Edges* tab (next to *Nodes*, or *Window ▸ Edges*) lists the edges on show
+with their source, target and every edge attribute. Click a header to sort, a row to select that edge (Ctrl/Shift+click
+adds), double-click to zoom to it. Resting the pointer on an edge in the graph shows its details in a tooltip, and a
+selected edge is shown in the *Inspector*.
+
+**Presets** — the *Presets* menu saves the settings you have now under a name: the appearance (node and edge colours,
+sizes, edge widths and line styles, labels), the edge attributes made from both ends, the filters (node and edge rules,
+expression, search) and the layout settings. *Apply* puts them on whatever graph is loaded (settings for columns it does
+not have are skipped); a preset can also be replaced with the current settings or deleted. Presets are kept in
+`presets.json` in the settings folder, so they are there for every session.
 
 **Appearance** — *Settings* opens the settings window directly. Mode (System / Dark / Light), interface size, and a
 *Translucency* section: a Windows 11 window backdrop (None, Mica, Mica Alt, Acrylic) and how solid the panels, the graph
@@ -168,6 +186,7 @@ graphsight --help
 | `data.rs` | CSV/JSON readers, typed columns, column auto-detection |
 | `graph.rs` | graph construction, adjacency, metrics (PageRank, k-core, components, Louvain) |
 | `edgeattr.rs` | edge attributes made from the nodes at both ends (pair, same / different, difference …) |
+| `presets.rs` | named presets of the appearance, edge attributes, filters and layout settings (`presets.json`) |
 | `expr.rs` | filter expression parser/evaluator |
 | `changes.rs` | finds the connections where an attribute changes, with per-value counts |
 | `coords.rs` | node coordinates → positions, the 3D orbit camera (perspective / orthographic) and its projection |
@@ -180,7 +199,7 @@ graphsight --help
 | `layout.rs` | static layouts and the Barnes–Hut force simulation |
 | `model.rs` | session state: appearance, filters, selection, camera, per-frame draw list |
 | `render.rs` | PNG (tiny-skia) and SVG export |
-| `app.rs`, `panels.rs`, `canvas.rs`, `table.rs` | egui UI; the canvas draws nodes as textured quads and edges as meshes |
+| `app.rs`, `panels.rs`, `canvas.rs`, `table.rs` | egui UI; the canvas draws nodes as textured quads and edges as meshes; the node and edge tables |
 | `theme.rs` | fonts, colours, spacing and small widgets (switch, segmented control) |
 | `dock.rs` | the dockable workspace: which panels exist, the default layout |
 | `project.rs`, `config.rs` | `.graphsight` session files; per-user settings, recent files and saved panel layout |

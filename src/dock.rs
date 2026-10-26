@@ -21,11 +21,26 @@ pub enum Tab {
     Table,
     Inspector,
     Legend,
+    /// The edges table.
+    EdgeTable,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 12] =
-        [Tab::Canvas, Tab::Data, Tab::Layout, Tab::Appearance, Tab::Filter, Tab::Analysis, Tab::Subgraph, Tab::Query, Tab::Section, Tab::Table, Tab::Inspector, Tab::Legend];
+    pub const ALL: [Tab; 13] = [
+        Tab::Canvas,
+        Tab::Data,
+        Tab::Layout,
+        Tab::Appearance,
+        Tab::Filter,
+        Tab::Analysis,
+        Tab::Subgraph,
+        Tab::Query,
+        Tab::Section,
+        Tab::Table,
+        Tab::EdgeTable,
+        Tab::Inspector,
+        Tab::Legend,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -41,6 +56,7 @@ impl Tab {
             Tab::Table => "Nodes",
             Tab::Inspector => "Inspector",
             Tab::Legend => "Legend",
+            Tab::EdgeTable => "Edges",
         }
     }
 }
@@ -52,7 +68,7 @@ pub fn default_dock() -> DockState<Tab> {
     let tree = dock.main_surface_mut();
     let [center, left] = tree.split_left(NodeIndex::root(), 0.22, vec![Tab::Data, Tab::Layout, Tab::Appearance, Tab::Subgraph]);
     tree.split_below(left, 0.6, vec![Tab::Filter, Tab::Analysis, Tab::Query, Tab::Section]);
-    let [center, _table] = tree.split_below(center, 0.74, vec![Tab::Table]);
+    let [center, _table] = tree.split_below(center, 0.74, vec![Tab::Table, Tab::EdgeTable]);
     let [_, right] = tree.split_right(center, 0.79, vec![Tab::Inspector]);
     tree.split_below(right, 0.62, vec![Tab::Legend]);
     dock
@@ -117,6 +133,15 @@ pub fn open_or_focus(dock: &mut DockState<Tab>, tab: Tab) {
     if let Some(path) = dock.find_tab(&tab) {
         let _ = dock.set_active_tab(path);
     } else {
+        // the two tables go together: a new one opens beside the other
+        let partner = match tab {
+            Tab::Table => Some(Tab::EdgeTable),
+            Tab::EdgeTable => Some(Tab::Table),
+            _ => None,
+        };
+        if let Some(path) = partner.and_then(|p| dock.find_tab(&p)) {
+            dock.set_focused_node_and_surface(path.node_path());
+        }
         dock.push_to_focused_leaf(tab);
     }
 }
@@ -151,6 +176,7 @@ impl TabViewer for Viewer<'_> {
         match *tab {
             Tab::Canvas => self.app.canvas(ui),
             Tab::Table => self.app.table_panel(ui),
+            Tab::EdgeTable => self.app.edge_table_panel(ui),
             other => self.app.panel_content(other, ui),
         }
     }
@@ -173,7 +199,7 @@ impl TabViewer for Viewer<'_> {
 
     fn scroll_bars(&self, tab: &Tab) -> [bool; 2] {
         match tab {
-            Tab::Canvas | Tab::Table => [false, false],
+            Tab::Canvas | Tab::Table | Tab::EdgeTable => [false, false],
             _ => [false, true],
         }
     }
@@ -193,7 +219,7 @@ impl TabViewer for Viewer<'_> {
                 s.tab_body.inner_margin = Margin::ZERO;
                 s.tab_body.bg_fill = egui::Color32::TRANSPARENT;
             }
-            Tab::Table => s.tab_body.inner_margin = Margin::symmetric(8, 4),
+            Tab::Table | Tab::EdgeTable => s.tab_body.inner_margin = Margin::symmetric(8, 4),
             _ => {}
         }
         Some(s)

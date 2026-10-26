@@ -3,7 +3,7 @@
 
 use crate::graph::Graph;
 use crate::model::{Rule, RuleKind};
-use crate::data::NULL_CODE;
+use crate::data::{Column, NULL_CODE};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
@@ -52,9 +52,15 @@ pub struct SubInfo {
 
 /// Clear `vis[i]` for every node that fails the rule.
 pub fn rule_pass(g: &Graph, r: &Rule, vis: &mut [bool]) {
-    let n = g.n();
-    let Some(col) = g.node_col(&r.col) else { return };
-    match &r.kind {
+    if let Some(col) = g.node_col(&r.col) {
+        col_pass(col, &r.kind, vis);
+    }
+}
+
+/// Clear `vis` for the rows of `col` that fail the rule (nodes or edges alike).
+pub fn col_pass(col: &Column, kind: &RuleKind, vis: &mut [bool]) {
+    let n = col.len().min(vis.len());
+    match kind {
         RuleKind::Range { lo, hi, keep_missing } => {
             if !col.is_numeric() {
                 return;

@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use egui::Vec2 as V2;
 use std::collections::HashMap;
 use std::path::Path;
+use crate::edgeattr::EdgeRef;
 
 // ───────────────────────────── appearance ─────────────────────────────
 
@@ -68,6 +69,12 @@ pub struct Look {
     pub edge_node_by: Option<String>,
     /// Colour edges by a numeric column as categories.
     pub edge_as_cat: bool,
+    /// Edge width from an attribute: thinnest and thickest, as multiples of the base width.
+    pub edge_width_by: Option<EdgeRef>,
+    pub edge_wmin: f32,
+    pub edge_wmax: f32,
+    /// Line pattern (solid, dashed, dotted …) per category of an attribute.
+    pub edge_dash_by: Option<EdgeRef>,
     pub edge_alpha: f32,
     pub edge_width: f32,
     pub arrows: bool,
@@ -96,6 +103,10 @@ impl Default for Look {
             edge_by: None,
             edge_node_by: None,
             edge_as_cat: false,
+            edge_width_by: None,
+            edge_wmin: 0.5,
+            edge_wmax: 4.0,
+            edge_dash_by: None,
             edge_alpha: 0.35,
             edge_width: 1.0,
             arrows: true,
@@ -135,13 +146,36 @@ pub struct StyleCache {
     /// What the edge colours mean, when they come from an attribute (counts are edges), and its title.
     pub edge_legend: Legend,
     pub edge_legend_title: String,
+    /// Width multiplier per edge, when width follows an attribute; the attribute and its range for the legend.
+    pub edge_w: Option<Vec<f32>>,
+    pub width_legend: Option<(String, String, String)>,
+    /// Line pattern per edge (an index into `DASHES`), when it follows an attribute; the legend: category, pattern, count.
+    pub edge_dash: Option<Vec<u8>>,
+    pub dash_legend: Vec<(String, u8, usize)>,
+    pub dash_title: String,
 }
 
 impl Default for StyleCache {
     fn default() -> Self {
-        StyleCache { node_rgb: vec![], node_r: vec![], edge_rgb: None, legend: Legend::None, edge_legend: Legend::None, edge_legend_title: String::new() }
+        StyleCache {
+            node_rgb: vec![],
+            node_r: vec![],
+            edge_rgb: None,
+            legend: Legend::None,
+            edge_legend: Legend::None,
+            edge_legend_title: String::new(),
+            edge_w: None,
+            width_legend: None,
+            edge_dash: None,
+            dash_legend: vec![],
+            dash_title: String::new(),
+        }
     }
 }
+
+/// Line patterns as (dash, gap) lengths in multiples of the line width; (0, 0) is a solid line.
+pub const DASHES: [(f32, f32, &str); 6] =
+    [(0.0, 0.0, "solid"), (6.0, 4.0, "dashed"), (1.2, 3.0, "dotted"), (12.0, 5.0, "long dashes"), (6.0, 3.0, "dash-dot"), (2.5, 2.5, "fine dashes")];
 
 fn scale_range(col: &Column, robust: bool) -> Option<(f64, f64)> {
     if robust {
@@ -268,7 +302,52 @@ pub fn compute_style(g: &Graph, look: &Look) -> StyleCache {
         },
         _ => (edge_rgb, Legend::None, String::new()),
     };
-    StyleCache { node_rgb, node_r, edge_rgb, legend, edge_legend, edge_legend_title }
+    // width from an attribute: numbers scale between the thinnest and thickest, categories step through that range
+    let (edge_w, width_legend) = match look.edge_width_by.as_ref().and_then(|r| r.values(g).map(|c| (r, c))) {
+        Some((r, col)) => {
+            let (lo_w, hi_w) = (look.edge_wmin, look.edge_wmax);
+            if col.is_numeric() && !col.hint_cat {
+                let range = scale_range(&col, true);
+                let w = (0..col.len())
+                    .map(|i| match (col.num(i), range) {
+                        (Some(v), Some((lo, hi))) if hi > lo => lo_w + (hi_w - lo_w) * ((v - lo) / (hi - lo)).clamp(0.0, 1.0) as f32,
+                        (Some(_), _) => (lo_w + hi_w) * 0.5,
+                        _ => lo_w,
+                    })
+                    .collect();
+                let (lo, hi) = range.unwrap_or((0.0, 0.0));
+                (Some(w), Some((r.label(), crate::data::fmt_num(lo), crate::data::fmt_num(hi))))
+            } else {
+                let (codes, labels) = col.as_categories();
+                let k = labels.len().max(2) - 1;
+                let w = codes.iter().map(|&c| if c == NULL_CODE { lo_w } else { lo_w + (hi_w - lo_w) * c as f32 / k as f32 }).collect();
+                (Some(w), Some((r.label(), labels.first().cloned().unwrap_or_default(), labels.last().cloned().unwrap_or_default())))
+            }
+        }
+        None => (None, None),
+    };
+    // a line pattern per category (numbers count as categories); the patterns repeat after six
+    let (edge_dash, dash_legend, dash_title) = match look.edge_dash_by.as_ref().and_then(|r| r.values(g).map(|c| (r, c))) {
+        Some((r, col)) => {
+            let (codes, labels) = col.as_categories();
+            let mut counts = vec![0usize; labels.len()];
+            let d = codes
+                .iter()
+                .map(|&c| {
+                    if c == NULL_CODE {
+                        0
+                    } else {
+                        counts[c as usize] += 1;
+                        (c as usize % DASHES.len()) as u8
+                    }
+                })
+                .collect();
+            let legend = labels.into_iter().enumerate().map(|(i, l)| (l, (i % DASHES.len()) as u8, counts[i])).collect();
+            (Some(d), legend, r.label())
+        }
+        None => (None, vec![], String::new()),
+    };
+    StyleCache { node_rgb, node_r, edge_rgb, legend, edge_legend, edge_legend_title, edge_w, width_legend, edge_dash, dash_legend, dash_title }
 }
 
 // ───────────────────────────── filters ─────────────────────────────
@@ -305,11 +384,13 @@ pub struct FilterState {
     pub rules: Vec<Rule>,
     pub expr_text: String,
     pub search: String,
+    /// Rules on edge attributes: an edge that fails one is dimmed or hidden (as filtered-out nodes are).
+    pub edge_rules: Vec<Rule>,
 }
 
 impl FilterState {
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty() && self.expr_text.trim().is_empty() && self.search.trim().is_empty()
+        self.rules.is_empty() && self.expr_text.trim().is_empty() && self.search.trim().is_empty() && self.edge_rules.is_empty()
     }
 }
 
@@ -411,6 +492,8 @@ pub struct Session {
     pub manual_hidden: Vec<bool>,
     pub n_vis: usize,
     pub n_vis_edges: usize,
+    /// Edges that pass the edge rules (all true without any).
+    pub edge_vis: Vec<bool>,
     pub sel: Vec<bool>,
     pub sel_count: usize,
     pub sel_version: u64,
@@ -461,6 +544,7 @@ impl Default for Session {
             vis: vec![],
             manual_hidden: vec![],
             n_vis: 0,
+            edge_vis: vec![],
             n_vis_edges: 0,
             sel: vec![],
             sel_count: 0,
@@ -576,6 +660,7 @@ impl Session {
         if !has(&self.g, &self.look.edge_node_by) {
             self.look.edge_node_by = None;
         }
+        self.drop_missing_edge_refs();
         for c in [&mut self.layout.order_by, &mut self.layout.ring_by, &mut self.layout.group_by, &mut self.layout.x_by, &mut self.layout.y_by] {
             if c.as_ref().is_some_and(|name| self.g.node_col(name).is_none()) {
                 *c = None;
@@ -679,13 +764,20 @@ impl Session {
             }
         }
         self.n_vis = vis.iter().filter(|v| **v).count();
-        let mut n_edges = g.edges.iter().filter(|&&(s, t)| vis[s as usize] && vis[t as usize]).count();
+        let mut edge_vis = vec![true; g.edges.len()];
+        for r in self.filter.edge_rules.iter().filter(|r| r.enabled) {
+            if let Some(col) = g.edge_col(&r.col) {
+                subgraph::col_pass(col, &r.kind, &mut edge_vis);
+            }
+        }
+        let mut n_edges = g.edges.iter().zip(&edge_vis).filter(|&(&(s, t), &ok)| ok && vis[s as usize] && vis[t as usize]).count();
         for list in self.bridge_lists() {
             n_edges += list.iter().filter(|&&(s, t, _)| vis[s as usize] && vis[t as usize]).count();
         }
         self.n_vis_edges = n_edges;
         self.dimmed = (0..n).map(|i| before_filter[i] && !vis[i]).collect();
         self.vis = vis;
+        self.edge_vis = edge_vis;
         self.recompute_changes();
         self.recompute_query();
     }
@@ -957,6 +1049,22 @@ impl Session {
         self.style = compute_style(&self.g, &self.look);
     }
 
+    /// Forget edge settings whose attribute is gone.
+    pub fn drop_missing_edge_refs(&mut self) {
+        let g = &self.g;
+        for r in [&mut self.look.edge_width_by, &mut self.look.edge_dash_by] {
+            if r.as_ref().is_some_and(|r| !r.exists(g)) {
+                *r = None;
+            }
+        }
+        self.filter.edge_rules.retain(|r| g.edge_col(&r.col).is_some());
+    }
+
+    /// Does edge `e` pass the edge rules?
+    pub fn edge_passes(&self, e: usize) -> bool {
+        self.edge_vis.get(e).copied().unwrap_or(true)
+    }
+
     /// Make an edge attribute from both ends and keep its recipe.
     pub fn add_edge_attr(&mut self, a: crate::edgeattr::EdgeAttr) -> Result<(), String> {
         if a.name.trim().is_empty() {
@@ -971,6 +1079,13 @@ impl Session {
         Ok(())
     }
 
+    /// Use these edge attributes from both ends instead of the ones there are (a preset brings its own).
+    pub fn set_edge_attrs(&mut self, list: Vec<crate::edgeattr::EdgeAttr>) {
+        self.g.edge_cols.retain(|c| !c.is_metric);
+        self.edge_attrs = list;
+        crate::edgeattr::apply(&mut self.g, &self.edge_attrs);
+    }
+
     /// Forget an edge attribute made from both ends (and stop colouring by it).
     pub fn remove_edge_attr(&mut self, i: usize) {
         if i >= self.edge_attrs.len() {
@@ -981,6 +1096,8 @@ impl Session {
         if self.look.edge_by.as_deref() == Some(a.name.as_str()) {
             self.look.edge_by = None;
         }
+        self.drop_missing_edge_refs();
+        self.recompute_visibility();
         self.recompute_style();
     }
 
@@ -1272,6 +1389,7 @@ impl Session {
 
     /// Forget settings that refer to columns the (possibly changed) files no longer have.
     pub fn drop_missing_columns(&mut self) {
+        self.drop_missing_edge_refs();
         let g = &self.g;
         let miss = |c: &Option<String>| c.as_ref().is_some_and(|c| g.node_col(c).is_none());
         if miss(&self.look.color_by) {
@@ -1431,6 +1549,10 @@ pub struct DrawEdge {
     pub target_r: f32,
     /// Gets an arrow head (if arrows are on).
     pub directed: bool,
+    /// Width as a multiple of the base edge width.
+    pub w: f32,
+    /// Line pattern: an index into `DASHES` (0 = solid).
+    pub dash: u8,
 }
 
 /// A bounding box projected to the screen (3D only). Parts behind the camera are already cut away.
@@ -1546,6 +1668,11 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         if !(shown(ai) && shown(bi)) {
             return None;
         }
+        let passes = s.edge_passes(e);
+        if !passes && !dim_hidden {
+            return None;
+        }
+        let both = both && passes;
         let cut = out_of(ai) || out_of(bi);
         if cut && section_hide {
             return None;
@@ -1599,7 +1726,9 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         if kind == 2 {
             alpha = 0.95 * depth_k((da + db) * 0.5, 0.25);
         }
-        let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi], directed: g.edge_directed(e) };
+        let w = s.style.edge_w.as_ref().map_or(1.0, |w| w[e]);
+        let dash = s.style.edge_dash.as_ref().map_or(0, |d| d[e]);
+        let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi], directed: g.edge_directed(e), w, dash };
         Some((de, kind))
     };
     const CHUNK: usize = 8192;
@@ -1667,14 +1796,14 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             while t < len && guard < 4000 {
                 let e = (t + dash).min(len);
                 let (p0, p1) = (pa + dir * t, pa + dir * e);
-                out.edges.push(DrawEdge { a: [p0.x, p0.y], b: [p1.x, p1.y], rgba, target_r: 0.0, directed: false });
+                out.edges.push(DrawEdge { a: [p0.x, p0.y], b: [p1.x, p1.y], rgba, target_r: 0.0, directed: false, w: 1.0, dash: 0 });
                 t += dash + gap;
                 guard += 1;
             }
             if directed {
                 // a short solid stretch at the target carries the arrow head
                 let tail = pa + dir * (len - dash.min(len));
-                out.edges.push(DrawEdge { a: [tail.x, tail.y], b: [pb.x, pb.y], rgba, target_r: radius[bi], directed: true });
+                out.edges.push(DrawEdge { a: [tail.x, tail.y], b: [pb.x, pb.y], rgba, target_r: radius[bi], directed: true, w: 1.0, dash: 0 });
             }
           }
         }
@@ -1852,7 +1981,7 @@ pub fn pick_edge(s: &Session, cam: &ViewCam, size: V2, p: V2) -> Option<usize> {
     let mut best: Option<(usize, f32, f32)> = None; // index, pixel distance, depth
     for (e, &(a, b)) in s.g.edges.iter().enumerate() {
         let (a, b) = (a as usize, b as usize);
-        if !s.vis[a] || !s.vis[b] || s.section_hides(a) || s.section_hides(b) {
+        if !s.vis[a] || !s.vis[b] || !s.edge_passes(e) || s.section_hides(a) || s.section_hides(b) {
             continue;
         }
         let (Some((pa, _, da)), Some((pb, _, db))) = (proj.at(s, a), proj.at(s, b)) else { continue };

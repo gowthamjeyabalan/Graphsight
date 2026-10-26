@@ -145,6 +145,50 @@ impl EdgeAttr {
     }
 }
 
+/// Where an edge's value for a setting comes from: an edge column, or a node column at one end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum End {
+    Edge,
+    Source,
+    Target,
+}
+
+/// An attribute for edges: an edge column, or the source's or target's value of a node column.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct EdgeRef {
+    pub end: End,
+    pub col: String,
+}
+
+impl EdgeRef {
+    /// How it reads in menus and legends.
+    pub fn label(&self) -> String {
+        match self.end {
+            End::Edge => self.col.clone(),
+            End::Source => format!("source: {}", self.col),
+            End::Target => format!("target: {}", self.col),
+        }
+    }
+
+    pub fn exists(&self, g: &Graph) -> bool {
+        match self.end {
+            End::Edge => g.edge_col(&self.col).is_some(),
+            _ => g.node_col(&self.col).is_some(),
+        }
+    }
+
+    /// Its value for every edge (borrowed for an edge column, made for a node column).
+    pub fn values<'a>(&self, g: &'a Graph) -> Option<std::borrow::Cow<'a, Column>> {
+        match self.end {
+            End::Edge => g.edge_col(&self.col).map(std::borrow::Cow::Borrowed),
+            End::Source | End::Target => {
+                let how = if self.end == End::Source { Combine::Source } else { Combine::Target };
+                EdgeAttr { name: self.label(), col: self.col.clone(), how }.compute(g).map(std::borrow::Cow::Owned)
+            }
+        }
+    }
+}
+
 /// Add the edge attributes to a freshly built graph (those whose node column is missing are skipped).
 pub fn apply(g: &mut Graph, list: &[EdgeAttr]) {
     for a in list {

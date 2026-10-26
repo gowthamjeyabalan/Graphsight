@@ -71,21 +71,27 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
     // edges, grouped by colour so uniform graphs need a single stroke call
     let stroke = Stroke { width: s.look.edge_width.max(0.2), ..Default::default() };
     let draw_edges = |pm: &mut Pixmap, edges: &[DrawEdge], wmul: f32| {
-        let stroke = Stroke { width: stroke.width * wmul, ..Default::default() };
-        let mut groups: Vec<([u8; 4], PathBuilder)> = Vec::new();
-        let mut index: std::collections::HashMap<[u8; 4], usize> = std::collections::HashMap::new();
+        // one stroke call per colour, width and pattern
+        type Key = ([u8; 4], u32, u8);
+        let mut groups: Vec<(Key, PathBuilder)> = Vec::new();
+        let mut index: std::collections::HashMap<Key, usize> = std::collections::HashMap::new();
         for e in edges {
-            let gi = *index.entry(e.rgba).or_insert_with(|| {
-                groups.push((e.rgba, PathBuilder::new()));
+            let key = (e.rgba, (e.w * 100.0).round() as u32, e.dash);
+            let gi = *index.entry(key).or_insert_with(|| {
+                groups.push((key, PathBuilder::new()));
                 groups.len() - 1
             });
             let pb = &mut groups[gi].1;
             pb.move_to(e.a[0], e.a[1]);
             pb.line_to(e.b[0], e.b[1]);
         }
-        for (rgba, pb) in groups {
+        for ((rgba, w100, dash), pb) in groups {
+            let width = stroke.width * wmul * w100 as f32 / 100.0;
+            let (d, g, _) = DASHES[dash as usize % DASHES.len()];
+            let unit = width.max(1.2);
+            let dash = if dash == 0 { None } else { tiny_skia::StrokeDash::new(vec![d * unit, g * unit], 0.0) };
             if let Some(path) = pb.finish() {
-                pm.stroke_path(&path, &paint(rgba), &stroke, tf, None);
+                pm.stroke_path(&path, &paint(rgba), &Stroke { width, dash, ..Default::default() }, tf, None);
             }
         }
         if s.g.directed && s.look.arrows {
@@ -161,7 +167,13 @@ pub fn render_svg(s: &Session, cam: &ViewCam, w: f32, h: f32) -> String {
     let _ = writeln!(out, r#"<g fill="none" stroke-width="{}">"#, s.look.edge_width);
     for (li, list) in [&dl.edges_back, &dl.edges, &dl.edges_hi].into_iter().enumerate() {
         for e in list.iter() {
-            let w = if li == 2 { format!(r#" stroke-width="{:.1}""#, s.look.edge_width * 2.4) } else { String::new() };
+            let mul = if li == 2 { 2.4 } else { 1.0 } * e.w;
+            let mut w = if (mul - 1.0).abs() > 1e-3 { format!(r#" stroke-width="{:.2}""#, s.look.edge_width * mul) } else { String::new() };
+            if e.dash != 0 {
+                let (d, g, _) = DASHES[e.dash as usize % DASHES.len()];
+                let unit = (s.look.edge_width * mul).max(1.2);
+                w.push_str(&format!(r#" stroke-dasharray="{:.1} {:.1}""#, d * unit, g * unit));
+            }
             let _ = writeln!(
                 out,
                 r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="rgb({},{},{})" stroke-opacity="{:.2}"{w}/>"#,

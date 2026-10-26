@@ -140,6 +140,38 @@ fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) -> egui::InnerRespon
     })
 }
 
+/// Pick an attribute for edges: an edge column, or a node column at the source or the target.
+fn combo_edge_ref(ui: &mut Ui, id: &str, current: &mut Option<crate::edgeattr::EdgeRef>, g: &crate::graph::Graph, none_label: &str) -> bool {
+    use crate::edgeattr::{End, EdgeRef};
+    let mut changed = false;
+    let text = current.as_ref().map_or_else(|| none_label.to_string(), |r| r.label());
+    ComboBox::from_id_salt(id).selected_text(text).width(ui.spacing().combo_width).height(360.0).show_ui(ui, |ui| {
+        if ui.selectable_label(current.is_none(), none_label).clicked() {
+            *current = None;
+            changed = true;
+        }
+        let groups = [
+            (End::Edge, "Edge attributes", g.edge_cols.iter().map(|c| c.name.clone()).collect::<Vec<_>>()),
+            (End::Source, "Source node", g.node_cols.iter().map(|c| c.name.clone()).collect()),
+            (End::Target, "Target node", g.node_cols.iter().map(|c| c.name.clone()).collect()),
+        ];
+        for (end, title, names) in groups {
+            if names.is_empty() {
+                continue;
+            }
+            ui.label(theme::secondary(title));
+            for name in names {
+                let r = EdgeRef { end, col: name };
+                if ui.selectable_label(current.as_ref() == Some(&r), r.label()).clicked() {
+                    *current = Some(r);
+                    changed = true;
+                }
+            }
+        }
+    });
+    changed
+}
+
 fn edge_mode_name(m: EdgeColorMode) -> &'static str {
     match m {
         EdgeColorMode::Uniform => "Single colour",
@@ -175,7 +207,7 @@ impl App {
             Tab::Section => self.section_panel(ui),
             Tab::Inspector => self.inspector(ui),
             Tab::Legend => self.legend(ui),
-            Tab::Canvas | Tab::Table => {}
+            Tab::Canvas | Tab::Table | Tab::EdgeTable => {}
         });
     }
 
@@ -520,8 +552,20 @@ impl App {
             }
             restyle |= self.edge_attr_builder(ui, cols);
             let look = &mut self.s.look;
+            row(ui, "Width by", |ui| {
+                restyle |= combo_edge_ref(ui, "edge_width_by", &mut look.edge_width_by, &self.s.g, "(same width)");
+            });
+            if look.edge_width_by.is_some() {
+                restyle |= slider(ui, &mut look.edge_wmin, 0.1..=2.0, "Thinnest ×", false);
+                restyle |= slider(ui, &mut look.edge_wmax, 1.0..=10.0, "Thickest ×", false);
+            }
+            row(ui, "Line style by", |ui| {
+                restyle |= combo_edge_ref(ui, "edge_dash_by", &mut look.edge_dash_by, &self.s.g, "(solid lines)");
+            })
+            .response
+            .on_hover_text("Solid, dashed, dotted … one pattern per value");
             slider(ui, &mut look.edge_alpha, 0.02..=1.0, "Opacity", true);
-            slider(ui, &mut look.edge_width, 0.4..=5.0, "Width", false);
+            slider(ui, &mut look.edge_width, 0.4..=5.0, if look.edge_width_by.is_some() { "Base width" } else { "Width" }, false);
             if self.s.g.directed {
                 ui.switch(&mut look.arrows, "Arrow heads");
             }
@@ -542,7 +586,11 @@ impl App {
 
     fn section_filter(&mut self, ui: &mut Ui, cols: &[ColInfo]) {
         let active = !self.s.filter.is_empty() || self.s.n_manual_hidden() > 0;
-        let title = format!("Showing {} of {} nodes", self.s.n_vis, self.s.g.n());
+        let title = if self.s.filter.edge_rules.is_empty() {
+            format!("Showing {} of {} nodes", self.s.n_vis, self.s.g.n())
+        } else {
+            format!("Showing {} of {} nodes, {} of {} edges", self.s.n_vis, self.s.g.n(), self.s.n_vis_edges, self.s.g.edges.len())
+        };
         body(ui, |ui| {
             // always shown, so the widgets below keep stable ids (a line that appears and disappears would
             // shift auto-generated ids and make the text boxes lose focus after the first typed character)
@@ -605,6 +653,46 @@ impl App {
                     changed = true;
                 }
             });
+            // rules on edge attributes
+            if !self.s.g.edge_cols.is_empty() {
+                ui.add_space(4.0);
+                theme::heading(ui, "Edges");
+                let mut remove: Option<usize> = None;
+                for (ri, rule) in self.s.filter.edge_rules.iter_mut().enumerate() {
+                    let Some(col) = self.s.g.edge_cols.iter().find(|c| c.name == rule.col) else { continue };
+                    theme::inner_card(ui).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            changed |= ui.switch(&mut rule.enabled, "").changed();
+                            ui.label(crate::theme::semibold(&rule.col));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("✕").clicked() {
+                                    remove = Some(ri);
+                                }
+                            });
+                        });
+                        changed |= rule_body(ui, &mut rule.kind, col, 10_000 + ri);
+                    });
+                }
+                if let Some(r) = remove {
+                    self.s.filter.edge_rules.remove(r);
+                    changed = true;
+                }
+                ui.menu_button("＋ Add edge rule", |ui| {
+                    ui.set_min_width(180.0);
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for c in &self.s.g.edge_cols {
+                            let label = if c.is_metric { format!("{}  (from both ends)", c.name) } else { c.name.clone() };
+                            if ui.button(label).clicked() {
+                                self.s.filter.edge_rules.push(Rule::new_for(c));
+                                changed = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                })
+                .response
+                .on_hover_text("Edges that fail a rule are dimmed or hidden, like filtered-out nodes");
+            }
             if self.s.n_manual_hidden() > 0 {
                 ui.horizontal(|ui| {
                     ui.weak(format!("{} nodes hidden by hand", self.s.n_manual_hidden()));
@@ -696,8 +784,12 @@ impl App {
     pub fn inspector(&mut self, ui: &mut Ui) {
         crate::theme::heading(ui, "Selection");
         let sel = self.s.selected_list();
-        if sel.is_empty() {
-            ui.weak("Click a node, or Shift-drag a box on the canvas.");
+        if sel.is_empty() && self.s.sel_edges.len() == 1 {
+            self.edge_details(ui, self.s.sel_edges[0] as usize, true);
+        } else if sel.is_empty() && self.s.sel_edges.len() > 1 {
+            ui.label(format!("{} edges selected", self.s.sel_edges.len()));
+        } else if sel.is_empty() {
+            ui.weak("Click a node or an edge, or Shift-drag a box on the canvas.");
         } else if sel.len() == 1 {
             let i = sel[0] as usize;
             ui.label(RichText::new(self.s.label_of(i)).heading());
@@ -852,18 +944,87 @@ impl App {
 
     pub fn legend(&mut self, ui: &mut Ui) {
         let st = &self.s.style;
-        let edges = !matches!(st.edge_legend, Legend::None);
+        let colours = !matches!(st.edge_legend, Legend::None);
+        let edges = colours || st.width_legend.is_some() || !st.dash_legend.is_empty();
         egui::ScrollArea::vertical().id_salt("legend_scroll").auto_shrink([false, false]).show(ui, |ui| {
             if edges {
                 theme::heading(ui, "Nodes");
             }
             legend_body(ui, &st.legend, None);
-            if edges {
-                ui.add_space(6.0);
-                theme::heading(ui, "Edges");
+            if !edges {
+                return;
+            }
+            ui.add_space(6.0);
+            theme::heading(ui, "Edges");
+            let ink = ui.visuals().text_color();
+            if colours {
                 legend_body(ui, &st.edge_legend, Some(&st.edge_legend_title));
+                ui.add_space(4.0);
+            }
+            if let Some((title, lo, hi)) = &st.width_legend {
+                ui.label(format!("Width: {title}"));
+                ui.horizontal(|ui| {
+                    for (w, text) in [(1.0f32, lo), (5.0, hi)] {
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 12.0), egui::Sense::hover());
+                        ui.painter().line_segment([r.left_center(), r.right_center()], egui::Stroke::new(w, ink));
+                        ui.label(text.as_str());
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            if !st.dash_legend.is_empty() {
+                ui.label(format!("Line style: {}", st.dash_title));
+                for (name, dash, count) in st.dash_legend.iter().take(40) {
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(34.0, 12.0), egui::Sense::hover());
+                        let (d, g, _) = DASHES[*dash as usize % DASHES.len()];
+                        let stroke = egui::Stroke::new(2.0, ink);
+                        if *dash == 0 {
+                            ui.painter().line_segment([r.left_center(), r.right_center()], stroke);
+                        } else {
+                            ui.painter().extend(egui::Shape::dashed_line(&[r.left_center(), r.right_center()], stroke, d * 2.0, g * 2.0));
+                        }
+                        ui.label(format!("{name}  ({count})"));
+                    });
+                }
+                if st.dash_legend.len() > 40 {
+                    ui.weak(format!("… {} more", st.dash_legend.len() - 40));
+                }
             }
         });
+    }
+
+    /// One edge: its two ends, its direction and every edge attribute. With `links`, the ends can be clicked.
+    pub fn edge_details(&mut self, ui: &mut Ui, e: usize, links: bool) {
+        let Some(&(a, b)) = self.s.g.edges.get(e) else { return };
+        let (a, b) = (a as usize, b as usize);
+        let arrow = if self.s.g.edge_directed(e) { "→" } else { "—" };
+        ui.label(RichText::new(format!("{} {arrow} {}", self.s.label_of(a), self.s.label_of(b))).strong());
+        let mut go = None;
+        egui::Grid::new(("edge_attrs", links)).num_columns(2).striped(links).show(ui, |ui| {
+            for (name, i) in [("source", a), ("target", b)] {
+                ui.weak(name);
+                if links {
+                    if ui.link(&self.s.g.ids[i]).clicked() {
+                        go = Some(i);
+                    }
+                } else {
+                    ui.label(&self.s.g.ids[i]);
+                }
+                ui.end_row();
+            }
+            for c in &self.s.g.edge_cols {
+                ui.weak(&c.name);
+                ui.label(c.label_at(e).unwrap_or_else(|| "—".into()));
+                ui.end_row();
+            }
+        });
+        if !self.s.edge_passes(e) {
+            ui.weak("Taken out by an edge rule (Filter).");
+        }
+        if let Some(i) = go {
+            self.select_and_focus(i);
+        }
     }
 }
 

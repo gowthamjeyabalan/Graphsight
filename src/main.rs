@@ -17,6 +17,7 @@ mod layout;
 mod menus;
 mod model;
 mod panels;
+mod presets;
 mod project;
 mod query;
 mod toolbar;

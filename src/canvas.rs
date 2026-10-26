@@ -276,6 +276,12 @@ impl App {
         self.maximize_button(ui, rect);
 
         // tooltip
+        if let (Some(e), None, None, true) = (self.hover_edge, self.hover, self.box_start, self.settings.show_tooltips && self.section_drag.is_none()) {
+            resp.clone().on_hover_ui_at_pointer(|ui| {
+                ui.set_max_width(320.0);
+                self.edge_details(ui, e, false);
+            });
+        }
         if let (Some(h), None, None, true) = (self.hover, self.drag_node, self.box_start, self.settings.show_tooltips && self.section_drag.is_none()) {
             resp.clone().on_hover_ui_at_pointer(|ui| {
                 ui.set_max_width(320.0);
@@ -457,6 +463,24 @@ impl App {
             if self.hover.is_some() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
+            // with no node under the pointer, an edge may be: looked up again only when the pointer or the view moved
+            let busy = ui.input(|i| i.pointer.any_down());
+            let probe = match (self.hover, resp.hovered(), ptr) {
+                (None, true, Some(p)) if !busy && on_line == [None, None] && on_arrow.is_none() && !self.view.region_on => Some(Vec2::new(p.x, p.y)),
+                _ => None,
+            };
+            let same = |at: &Option<(Vec2, ViewCam)>, p: Vec2| at.is_some_and(|(q, c)| q == p && c.center == self.cam.center && c.zoom == self.cam.zoom);
+            self.hover_edge = match probe {
+                Some(p) if same(&self.hover_edge_at, p) => self.hover_edge,
+                Some(p) => {
+                    self.hover_edge_at = Some((p, self.cam));
+                    if self.s.g.edges.len() <= 300_000 { pick_edge(&self.s, &self.cam, size, p) } else { None }
+                }
+                None => {
+                    self.hover_edge_at = None;
+                    None
+                }
+            };
         }
 
         // drag start: egui reports it only after the pointer has moved a few pixels, so look at where
@@ -763,7 +787,13 @@ impl App {
             }
             let fill = |sink: &mut MeshSink, e: &DrawEdge| {
                 let c = col(e.rgba);
-                sink.line(Pos2::new(e.a[0], e.a[1]) + off, Pos2::new(e.b[0], e.b[1]) + off, width, c, aa);
+                let (a, b) = (Pos2::new(e.a[0], e.a[1]) + off, Pos2::new(e.b[0], e.b[1]) + off);
+                let w = width * e.w;
+                if e.dash == 0 {
+                    sink.line(a, b, w, c, aa);
+                } else {
+                    dashed_line(sink, a, b, w, e.dash, c, aa);
+                }
                 if arrows && e.directed {
                     if let Some(t) = arrow_points(e.a, e.b, e.target_r) {
                         sink.triangle([Pos2::new(t[0][0], t[0][1]) + off, Pos2::new(t[1][0], t[1][1]) + off, Pos2::new(t[2][0], t[2][1]) + off], c);
@@ -792,6 +822,19 @@ impl App {
                 for e in list.iter() {
                     fill(&mut sink, e);
                 }
+                for m in sink.finish() {
+                    painter.add(Shape::mesh(m));
+                }
+            }
+        }
+
+        // the edge under the pointer: a lighter line over it
+        if let Some(&(a, b)) = self.hover_edge.and_then(|e| self.s.g.edges.get(e)) {
+            let proj = self.s.projector(&self.cam, self.canvas_size);
+            if let (Some((pa, _, _)), Some((pb, _, _))) = (proj.at(&self.s, a as usize), proj.at(&self.s, b as usize)) {
+                let t = look.text_color();
+                let mut sink = MeshSink::new(TextureId::default());
+                sink.line(Pos2::new(pa.x, pa.y) + off, Pos2::new(pb.x, pb.y) + off, (width * 2.0).max(2.5), Color32::from_rgba_unmultiplied(t[0], t[1], t[2], 150), true);
                 for m in sink.finish() {
                     painter.add(Shape::mesh(m));
                 }
@@ -1146,5 +1189,36 @@ impl App {
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_rgb(110, 170, 255)), StrokeKind::Inside);
             }
         }
+    }
+}
+
+/// A line drawn in one of the `DASHES` patterns; the pattern grows with the line width.
+fn dashed_line(sink: &mut MeshSink, a: Pos2, b: Pos2, w: f32, dash: u8, c: Color32, aa: bool) {
+    let (d, g, _) = crate::model::DASHES[dash as usize % crate::model::DASHES.len()];
+    let unit = w.max(1.2);
+    let (d, g) = (d * unit, g * unit);
+    let v = b - a;
+    let len = v.length();
+    if !len.is_finite() || len < 0.5 || d <= 0.0 {
+        sink.line(a, b, w, c, aa);
+        return;
+    }
+    let dir = v / len;
+    // dash-dot: a dash, then a dot, in one period
+    let dot = dash == 4;
+    let period = if dot { d + g + unit + g } else { d + g };
+    let mut t = 0.0f32;
+    let mut guard = 0;
+    while t < len && guard < 600 {
+        let e = (t + d).min(len);
+        sink.line(a + dir * t, a + dir * e, w, c, aa);
+        if dot {
+            let s0 = t + d + g;
+            if s0 < len {
+                sink.line(a + dir * s0, a + dir * (s0 + unit).min(len), w, c, aa);
+            }
+        }
+        t += period;
+        guard += 1;
     }
 }
