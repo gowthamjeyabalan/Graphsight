@@ -1,9 +1,10 @@
-// Revit macro: export lightweight triangulated geometry of chosen elements to one OBJ file, for Graphsight.
+// Revit macro: export lightweight solids of chosen elements to one OBJ file, for Graphsight.
 //
 // Running ExportGeometry opens a window: pick the elements by any parameter and its values (workset, category,
 // family, type, level or any other parameter), the parameter each solid is named by (Graphsight matches this name
-// to a node column), one solid per family type or per element, the detail level, and shared or internal
-// coordinates. Then choose where to save the .obj. Units: metres, Z up.
+// to a node attribute) and the detail level, then where to save the .obj. Each solid is written as a shape only,
+// centred on 0, 0, 0, in metres with Z up: the node's own coordinates say where it goes. With "one solid per name"
+// (on by default) only the first element of each name is written, so e.g. one solid per family serves all its nodes.
 //
 // Setup (Revit 2025 and later): Manage > Macro Manager > Application tab > Module (C#). Replace the module's
 // ThisApplication.cs with this file (keep the AddInId line Revit generated for your module), build, then run
@@ -40,7 +41,8 @@ namespace ExportGeometry
 
       // ------------------------------------------------------------------
       // SETTINGS that do not change from run to run
-      // (which elements, how solids are named, detail and coordinates are chosen in the window each time)
+      // (which elements, how solids are named and the detail are chosen in the window each time).
+      // Every solid is written as a shape only, centred on 0, 0, 0: Graphsight puts it on its node.
       // ------------------------------------------------------------------
 
       // Only elements visible in the active view; and if elements are selected, only those.
@@ -64,9 +66,8 @@ namespace ExportGeometry
          public string FilterParameter = "";            // "" = every element
          public HashSet<string> FilterValues = new HashSet<string>();
          public string NameParameter = "Id";
-         public bool PerType;
+         public bool OnePerName = true;                  // only the first element of each name is written
          public ViewDetailLevel Detail = ViewDetailLevel.Coarse;
-         public bool SharedCoordinates;
       }
 
       // ------------------------------------------------------------------
@@ -104,7 +105,7 @@ namespace ExportGeometry
             {
                dlg.Title = "Save geometry as OBJ";
                dlg.Filter = "OBJ file|*.obj";
-               dlg.FileName = Safe(doc.Title) + (choice.PerType ? "_types" : "") + "_" + DateTime.Now.ToString("yyyyMMdd_HHmm") + ".obj";
+               dlg.FileName = Safe(doc.Title) + "_" + Safe(choice.NameParameter) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmm") + ".obj";
                dlg.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
                if (dlg.ShowDialog() != DialogResult.OK)
                   return;
@@ -116,7 +117,8 @@ namespace ExportGeometry
 
             TaskDialog.Show("Export geometry",
                objects + " solids, " + triangles + " triangles\n" +
-               "Named by: " + (choice.PerType ? "Family : Type" : choice.NameParameter) + "\n\n" + file);
+               "Named by: " + choice.NameParameter + "\n" +
+               "Each solid is centred on 0, 0, 0 (shape and size only): Graphsight puts it on its node.\n\n" + file);
          }
          catch (Exception ex)
          {
@@ -203,11 +205,12 @@ namespace ExportGeometry
          Label nameHelp = Add("Use the same parameter as the column you match by in Graphsight.", y);
          nameHelp.ForeColor = System.Drawing.SystemColors.GrayText;
          y += 24;
-         CheckBox chkType = new CheckBox();
-         chkType.Text = "One solid per family type, in the family's own coordinates" + Environment.NewLine + "(a shape library, named \"Family : Type\")";
-         chkType.AutoSize = true;
-         chkType.Location = new System.Drawing.Point(14, y);
-         f.Controls.Add(chkType);
+         CheckBox chkOne = new CheckBox();
+         chkOne.Text = "One solid per name: only the first element of each name is written" + Environment.NewLine + "(every node with that name gets the same solid)";
+         chkOne.AutoSize = true;
+         chkOne.Checked = true;
+         chkOne.Location = new System.Drawing.Point(14, y);
+         f.Controls.Add(chkOne);
          y += 46;
 
          // detail and coordinates
@@ -222,11 +225,8 @@ namespace ExportGeometry
          cbDetail.SelectedIndex = 0;
          f.Controls.Add(cbDetail);
          y += 32;
-         CheckBox chkShared = new CheckBox();
-         chkShared.Text = "Shared coordinates (survey point) instead of the internal origin";
-         chkShared.AutoSize = true;
-         chkShared.Location = new System.Drawing.Point(14, y);
-         f.Controls.Add(chkShared);
+         Label shapeHelp = Add("Solids are written as shapes only, centred on 0, 0, 0, in metres.", y);
+         shapeHelp.ForeColor = System.Drawing.SystemColors.GrayText;
          y += 34;
 
          Button ok = new Button();
@@ -299,7 +299,6 @@ namespace ExportGeometry
          };
          bAll.Click += (s, a) => { filling = true; for (int i = 0; i < lbValues.Items.Count; i++) lbValues.SetItemChecked(i, true); filling = false; UpdateCount(); };
          bNone.Click += (s, a) => { filling = true; for (int i = 0; i < lbValues.Items.Count; i++) lbValues.SetItemChecked(i, false); filling = false; UpdateCount(); };
-         chkType.CheckedChanged += (s, a) => cbName.Enabled = !chkType.Checked;
          FillValues();
 
          if (f.ShowDialog() != DialogResult.OK)
@@ -310,9 +309,8 @@ namespace ExportGeometry
          c.FilterParameter = fp == EVERY ? "" : fp;
          c.FilterValues = new HashSet<string>(lbValues.CheckedItems.Cast<ValueItem>().Select(i => i.Value));
          c.NameParameter = cbName.SelectedItem as string ?? "Id";
-         c.PerType = chkType.Checked;
+         c.OnePerName = chkOne.Checked;
          c.Detail = cbDetail.SelectedIndex == 2 ? ViewDetailLevel.Fine : cbDetail.SelectedIndex == 1 ? ViewDetailLevel.Medium : ViewDetailLevel.Coarse;
-         c.SharedCoordinates = chkShared.Checked;
          return c;
       }
 
@@ -365,66 +363,42 @@ namespace ExportGeometry
          opt.ComputeReferences = false;
          opt.IncludeNonVisibleObjects = false;
 
-         Transform toFile = c.SharedCoordinates
-            ? doc.ActiveProjectLocation.GetTotalTransform().Inverse
-            : Transform.Identity;
-
          objects = 0;
          triangles = 0;
          int vertexBase = 1;
-         HashSet<string> doneTypes = new HashSet<string>();
          HashSet<string> usedNames = new HashSet<string>();
 
          using (System.IO.StreamWriter w = new System.IO.StreamWriter(file, false, new UTF8Encoding(false)))
          {
             w.WriteLine("# Revit geometry from " + doc.Title);
-            w.WriteLine("# units: " + (Math.Abs(SCALE - 0.3048) < 1e-9 ? "metres" : "scale " + Num(SCALE) + " x feet") + ", Z up, "
-               + (c.PerType ? "one object per family type in family coordinates" : (c.SharedCoordinates ? "shared coordinates" : "internal coordinates")));
-            w.WriteLine("# object names: " + (c.PerType ? "Family : Type" : c.NameParameter));
+            w.WriteLine("# units: " + (Math.Abs(SCALE - 0.3048) < 1e-9 ? "metres" : "scale " + Num(SCALE) + " x feet") + ", Z up, each solid centred on 0 0 0 (shape only)");
+            w.WriteLine("# object names: " + c.NameParameter + (c.OnePerName ? " (one solid per name)" : ""));
             if (!string.IsNullOrEmpty(c.FilterParameter))
                w.WriteLine("# elements: " + c.FilterParameter + " = " + string.Join(" | ", c.FilterValues));
 
             foreach (Element e in elements)
             {
+               string name = ValueOf(doc, e, c.NameParameter);
+               if (string.IsNullOrEmpty(name)) name = e.Id.ToString();
+               // a name already written stands for this element too
+               if (c.OnePerName && usedNames.Contains(name)) continue;
+
                List<XYZ> verts = new List<XYZ>();
                List<int> tris = new List<int>();
-               string name;
-
                try
                {
-                  if (c.PerType)
-                  {
-                     FamilyInstance? fi = e as FamilyInstance;
-                     if (fi == null || fi.Symbol == null) continue;
-                     string key = fi.Symbol.Id.ToString();
-                     if (doneTypes.Contains(key)) continue;
-
-                     GeometryElement? ge = e.get_Geometry(opt);
-                     GeometryInstance? gi = ge == null ? null : FirstInstance(ge);
-                     if (gi == null) continue;
-
-                     Gather(gi.GetSymbolGeometry(), Transform.Identity, verts, tris);
-                     if (tris.Count == 0) continue;
-                     doneTypes.Add(key);
-                     name = fi.Symbol.FamilyName + " : " + fi.Symbol.Name;
-                  }
-                  else
-                  {
-                     GeometryElement? ge = e.get_Geometry(opt);
-                     if (ge == null) continue;
-
-                     Gather(ge, toFile, verts, tris);
-                     if (tris.Count == 0) continue;
-                     name = ValueOf(doc, e, c.NameParameter);
-                     if (string.IsNullOrEmpty(name)) name = e.Id.ToString();
-                  }
+                  GeometryElement? ge = e.get_Geometry(opt);
+                  if (ge == null) continue;
+                  Gather(ge, Transform.Identity, verts, tris);
+                  if (tris.Count == 0) continue;
                }
                catch
                {
                   continue;   // one bad element must not stop the export
                }
+               Centre(verts);
 
-               // two solids with the same name would merge on import: keep names unique
+               // without "one solid per name", repeated names are kept apart
                string unique = name;
                for (int k = 2; usedNames.Contains(unique); k++) unique = name + " #" + k;
                usedNames.Add(unique);
@@ -439,6 +413,25 @@ namespace ExportGeometry
                objects++;
                triangles += tris.Count / 3;
             }
+         }
+      }
+
+      // Move the points so the middle of their bounding box is at 0, 0, 0: the shape without its place in the model.
+      private static void Centre(List<XYZ> verts)
+      {
+         if (verts.Count == 0) return;
+         double x0 = double.MaxValue, y0 = double.MaxValue, z0 = double.MaxValue;
+         double x1 = double.MinValue, y1 = double.MinValue, z1 = double.MinValue;
+         foreach (XYZ p in verts)
+         {
+            x0 = Math.Min(x0, p.X); y0 = Math.Min(y0, p.Y); z0 = Math.Min(z0, p.Z);
+            x1 = Math.Max(x1, p.X); y1 = Math.Max(y1, p.Y); z1 = Math.Max(z1, p.Z);
+         }
+         double cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, cz = (z0 + z1) / 2;
+         for (int i = 0; i < verts.Count; i++)
+         {
+            XYZ p = verts[i];
+            verts[i] = new XYZ(Math.Round(p.X - cx, DECIMALS), Math.Round(p.Y - cy, DECIMALS), Math.Round(p.Z - cz, DECIMALS));
          }
       }
 
@@ -523,16 +516,6 @@ namespace ExportGeometry
       // ------------------------------------------------------------------
       // Geometry
       // ------------------------------------------------------------------
-      private static GeometryInstance? FirstInstance(GeometryElement ge)
-      {
-         foreach (GeometryObject o in ge)
-         {
-            GeometryInstance? gi = o as GeometryInstance;
-            if (gi != null) return gi;
-         }
-         return null;
-      }
-
       // Every solid and mesh in ge (nested families too) as triangles, through tf, scaled,
       // with shared corners written once.
       private static void Gather(GeometryElement ge, Transform tf, List<XYZ> verts, List<int> tris)

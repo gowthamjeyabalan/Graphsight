@@ -1400,14 +1400,14 @@ impl App {
         }
         ui.add_space(2.0);
         ui.label("Place each solid");
-        ui.segmented(&mut self.s.geo_set.place, &[(Place::Model, "Where it is"), (Place::AtNode, "At its node"), (Place::FillBox, "In its box")]);
+        ui.segmented(&mut self.s.geo_set.place, &[(Place::AtNode, "On its node"), (Place::FillBox, "In its box"), (Place::Model, "Where the file has it")]);
         ui.weak(match self.s.geo_set.place {
-            Place::Model => "The file's coordinates are model coordinates, in the same units as the X, Y and Z columns (one solid per element).",
-            Place::AtNode => "Each solid is drawn around its node (a library of shapes, such as one solid per family type).",
+            Place::AtNode => "Each solid is centred on its node, at its own size (metres, like the X, Y and Z columns). Use Size × when the coordinates are in other units.",
+            Place::Model => "The file's coordinates are model coordinates, in the same units and origin as the X, Y and Z columns.",
             Place::FillBox => "Each solid is stretched to fill its node's bounding box (Show bounding boxes must be on; nodes without a box get it at their node).",
         });
         if self.s.geo_set.place == Place::AtNode {
-            slider(ui, &mut self.s.geo_set.size, 0.05..=20.0, "Size ×", true);
+            slider(ui, &mut self.s.geo_set.size, 0.001..=1000.0, "Size ×", true);
         }
         ui.horizontal(|ui| {
             if ui.button("Load another file…").clicked() {

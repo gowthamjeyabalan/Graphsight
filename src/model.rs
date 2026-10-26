@@ -1993,7 +1993,11 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
                 // every placement is a scale and a shift per axis
                 let scale = [0, 1, 2].map(|a| xf.scale[a] as f32);
                 let model = ([0, 1, 2].map(|a| scale[a]), [0, 1, 2].map(|a| (-xf.mid[a] * xf.scale[a]) as f32));
-                let at_node = |k: f32| ([0, 1, 2].map(|a| scale[a] * k), s.pos3[i]);
+                // at the node: the middle of the solid goes on the node, wherever the file put the solid
+                let at_node = |k: f32| {
+                    let mul = [0, 1, 2].map(|a| scale[a] * k);
+                    (mul, [0, 1, 2].map(|a| s.pos3[i][a] - (mesh.lo[a] + mesh.hi[a]) * 0.5 * mul[a]))
+                };
                 let boxed = fit.as_ref().and_then(|m| m[i]).map(|k| &s.box_items[k as usize]);
                 let (mul, add) = match (s.geo_set.place, boxed) {
                     (Place::Model, _) => model,

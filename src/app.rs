@@ -277,7 +277,24 @@ impl App {
     /// Load solids from an OBJ file and say how many nodes they matched.
     pub fn load_geometry(&mut self, path: &std::path::Path) {
         match self.s.load_geometry(path) {
-            Ok(()) => self.restyle(),
+            Ok(()) => {
+                self.restyle();
+                // say what happened when the solids cannot be seen yet
+                let info = self.s.geo_info;
+                let n = self.s.geo.as_ref().map_or(0, |l| l.meshes.len());
+                if info.nodes == 0 {
+                    self.error = Some(format!(
+                        "Loaded {n} solids, but no node has a value equal to their names. Under Layout ▸ Geometry ▸ Match by, choose the node attribute that holds the same values as the names in the file."
+                    ));
+                } else if !self.s.is_3d() {
+                    self.error = Some(format!(
+                        "Loaded {n} solids: {} of {} nodes have one (matched by {}).\n\nSolids are drawn in the 3D view: Layout ▸ Place nodes by coordinates with X, Y and Z columns, view 3D orbit.",
+                        info.nodes,
+                        self.s.g.n(),
+                        self.s.geo_set.match_by.clone().unwrap_or_default()
+                    ));
+                }
+            }
             Err(e) => self.error = Some(format!("{e:#}")),
         }
     }
@@ -2141,6 +2158,33 @@ mod ui_tests {
             let size = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max) - xs.iter().cloned().fold(f32::INFINITY, f32::min);
             assert!((mid(&xs) - n.x).abs() < size * 0.1 && (mid(&ys) - n.y).abs() < size * 0.1, "solid of node {} sits on it", n.idx);
         }
+        // a file with only the shapes (here far from every node) still puts each solid on its node
+        let mut far = String::from("o 1001
+");
+        for c in 0..8 {
+            let d = |bit: i32| if c & bit != 0 { 1.0 } else { -1.0 };
+            far += &format!("v {} {} {}
+", 500.0 + d(1), 700.0 + d(2), -300.0 + d(4));
+        }
+        far += "f 1 2 4 3
+f 5 6 8 7
+f 1 2 6 5
+f 3 4 8 7
+f 1 3 7 5
+f 2 4 8 6
+";
+        std::fs::write(dir.join("far.obj"), &far).unwrap();
+        h.app.load_path(dir.join("far.obj"), None);
+        assert_eq!(h.app.s.geo_set.place, Place::AtNode, "on its node is the default");
+        h.frames(2);
+        let n0 = h.app.draw.nodes.iter().find(|n| h.app.s.g.ids[n.idx as usize] == "n0").unwrap();
+        let xs: Vec<f32> = n0.solid.iter().flat_map(|t| t.0.iter().map(|p| p[0])).collect();
+        assert!(!xs.is_empty());
+        let size = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max) - xs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let mid = (xs.iter().cloned().fold(f32::INFINITY, f32::min) + xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max)) * 0.5;
+        assert!((mid - n0.x).abs() < size * 0.15, "centred on the node");
+        h.app.load_path(dir.join("model.obj"), None);
+
         // at the node, and stretched into the boxes (twice the cube's size), both draw
         h.app.s.geo_set.place = Place::AtNode;
         h.frames(2);

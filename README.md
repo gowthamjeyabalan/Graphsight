@@ -161,13 +161,15 @@ session.
 nodes' colours, shaded. Every named object in the file (`o name`, or `g name` when there are no objects) is one solid,
 and a node gets the solid whose name equals its value in the *Match by* column (the column with the most matches is
 picked for you, the node id included). One solid per element (names are element ids) and one solid shared by many
-nodes (names are family types) both work. *Place each solid*: **where it is** (the file is in model coordinates, the
-same as the X, Y and Z columns), **at its node** (a library of shapes around 0, 0, 0, with a size factor), or **in its
-box** (stretched to fill the node's bounding box). Solids too small on screen to matter are drawn as plain nodes. The
+nodes (names are family names or types) both work. *Place each solid*: **on its node** (the default: the file only gives
+each solid's shape and size, it is centred on its node; a size factor helps when the coordinates are not in metres),
+**in its box** (stretched to fill the node's bounding box), or **where the file has it** (the file is in model
+coordinates, the same as the X, Y and Z columns). Solids too small on screen to matter are drawn as plain nodes. The
 file and its settings are kept in the session (found again next to the session file if it was moved).
-[`tools/revit/ExportGeometry.cs`](tools/revit/ExportGeometry.cs) is a Revit macro that writes such a file: light,
-triangulated solids of the elements picked by any parameter (workset, category, family, type, level …), named by
-their Id, UniqueId or any parameter, in metres with Z up — or one solid per family type for a library.
+[`tools/revit/ExportGeometry.cs`](tools/revit/ExportGeometry.cs) is a Revit macro that writes such a file. A window
+picks the elements by any parameter and its values (workset, category, family, type, level …) and the parameter that
+names each solid; each solid is only a shape, centred on 0, 0, 0, in metres with Z up, and by default only the first
+element of each name is written (one solid per family, say, shared by all its nodes).
 
 **Node shapes** — *Appearance ▸ Node shape ▸ Shape by* gives each value of any node attribute its own shape: circle,
 square, triangle, triangle pointing down, diamond, pentagon, hexagon, star, plus and ring (after ten values the shapes

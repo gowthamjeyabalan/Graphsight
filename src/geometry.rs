@@ -31,11 +31,10 @@ pub struct GeoLib {
 /// Where a node's solid goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Place {
-    /// The solid's own coordinates are model coordinates, the same as the node coordinate columns (one solid per
-    /// element, exported at its place in the model).
-    #[default]
+    /// The solid's own coordinates are model coordinates, the same as the node coordinate columns.
     Model,
-    /// The solid is in its own coordinates around 0, 0, 0 and is moved to the node (a library: one solid per type).
+    /// The middle of the solid goes on the node: the file only gives the shape and its size, the node gives the place.
+    #[default]
     AtNode,
     /// The solid is stretched to fill the node's bounding box.
     FillBox,
@@ -56,7 +55,7 @@ pub struct GeoSettings {
 
 impl Default for GeoSettings {
     fn default() -> Self {
-        GeoSettings { path: None, match_by: None, place: Place::Model, size: 1.0, show: true }
+        GeoSettings { path: None, match_by: None, place: Place::AtNode, size: 1.0, show: true }
     }
 }
 
