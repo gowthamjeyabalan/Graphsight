@@ -85,6 +85,14 @@ pub struct Look {
     pub highlight_hood: bool,
     pub filtered: FilteredMode,
     pub dark: bool,
+    /// Your own colours instead of the theme's (None: the theme's): edges in "single colour", the graph background,
+    /// labels and other text on the graph.
+    pub edge_color: Option<Rgb>,
+    pub background_color: Option<Rgb>,
+    pub label_color: Option<Rgb>,
+    /// Your own colour for a value of a column: (column, value, colour). Used wherever that column colours nodes or
+    /// edges by category.
+    pub cat_colors: Vec<(String, String, Rgb)>,
 }
 
 impl Default for Look {
@@ -118,19 +126,45 @@ impl Default for Look {
             highlight_hood: true,
             filtered: FilteredMode::Dim,
             dark: true,
+            edge_color: None,
+            background_color: None,
+            label_color: None,
+            cat_colors: vec![],
         }
     }
 }
 
 impl Look {
     pub fn background(&self) -> Rgb {
-        if self.dark { [20, 22, 28] } else { [250, 250, 252] }
+        self.background_color.unwrap_or(self.default_background())
     }
     pub fn edge_base(&self) -> Rgb {
-        if self.dark { [170, 180, 195] } else { [90, 96, 108] }
+        self.edge_color.unwrap_or(self.default_edge())
     }
     pub fn text_color(&self) -> Rgb {
+        self.label_color.unwrap_or(self.default_text())
+    }
+    pub fn default_background(&self) -> Rgb {
+        if self.dark { [20, 22, 28] } else { [250, 250, 252] }
+    }
+    pub fn default_edge(&self) -> Rgb {
+        if self.dark { [170, 180, 195] } else { [90, 96, 108] }
+    }
+    pub fn default_text(&self) -> Rgb {
         if self.dark { [225, 228, 235] } else { [30, 32, 40] }
+    }
+
+    /// Your own colour for a value of a column, if you chose one.
+    pub fn cat_color_of(&self, col: &str, value: &str) -> Option<Rgb> {
+        self.cat_colors.iter().find(|(c, v, _)| c == col && v == value).map(|x| x.2)
+    }
+
+    /// Choose (Some) or forget (None) your own colour for a value of a column.
+    pub fn set_cat_color(&mut self, col: &str, value: &str, rgb: Option<Rgb>) {
+        self.cat_colors.retain(|(c, v, _)| !(c == col && v == value));
+        if let Some(rgb) = rgb {
+            self.cat_colors.push((col.to_string(), value.to_string(), rgb));
+        }
     }
 }
 
@@ -149,6 +183,9 @@ pub struct StyleCache {
     /// What the edge colours mean, when they come from an attribute (counts are edges), and its title.
     pub edge_legend: Legend,
     pub edge_legend_title: String,
+    /// The columns the node and edge colour legends show.
+    pub legend_col: Option<String>,
+    pub edge_legend_col: Option<String>,
     /// Width multiplier per edge, when width follows an attribute; the attribute and its range for the legend.
     pub edge_w: Option<Vec<f32>>,
     pub width_legend: Option<(String, String, String)>,
@@ -171,6 +208,8 @@ impl Default for StyleCache {
             legend: Legend::None,
             edge_legend: Legend::None,
             edge_legend_title: String::new(),
+            legend_col: None,
+            edge_legend_col: None,
             edge_w: None,
             width_legend: None,
             edge_dash: None,
@@ -203,6 +242,8 @@ fn color_column(col: &Column, as_cat: bool, look: &Look) -> (Vec<Rgb>, Legend) {
     if !col.is_numeric() || as_cat || col.hint_cat {
         let (codes, labels) = col.as_categories();
         let mut counts = vec![0usize; labels.len()];
+        // the default colour of each value, or the one you chose for it
+        let by_label: Vec<Rgb> = labels.iter().enumerate().map(|(i, l)| look.cat_color_of(&col.name, l).unwrap_or(cat_color(i))).collect();
         let colors: Vec<Rgb> = codes
             .iter()
             .map(|&c| {
@@ -210,11 +251,11 @@ fn color_column(col: &Column, as_cat: bool, look: &Look) -> (Vec<Rgb>, Legend) {
                     MISSING
                 } else {
                     counts[c as usize] += 1;
-                    cat_color(c as usize)
+                    by_label[c as usize]
                 }
             })
             .collect();
-        let legend = Legend::Cat(labels.iter().enumerate().map(|(i, l)| (l.clone(), cat_color(i), counts[i])).collect());
+        let legend = Legend::Cat(labels.iter().enumerate().map(|(i, l)| (l.clone(), by_label[i], counts[i])).collect());
         (colors, legend)
     } else {
         let Some((lo, hi)) = scale_range(col, look.robust) else {
@@ -379,6 +420,12 @@ pub fn compute_style(g: &Graph, look: &Look) -> StyleCache {
         }
         None => (None, vec![], String::new()),
     };
+    let legend_col = look.color_by.clone().filter(|c| g.node_col(c).is_some());
+    let edge_legend_col = match look.edge_mode {
+        EdgeColorMode::Attribute => look.edge_by.clone(),
+        EdgeColorMode::SourceAttr | EdgeColorMode::TargetAttr => look.edge_node_by.clone(),
+        _ => None,
+    };
     StyleCache {
         node_rgb,
         node_r,
@@ -386,6 +433,8 @@ pub fn compute_style(g: &Graph, look: &Look) -> StyleCache {
         legend,
         edge_legend,
         edge_legend_title,
+        legend_col,
+        edge_legend_col,
         edge_w,
         width_legend,
         edge_dash,
@@ -1458,6 +1507,24 @@ impl Session {
     }
 
     /// Put the session back into a saved state: positions, pins, selection and hand-hidden nodes by id.
+    /// Put the nodes back where a named view had them, and hide the nodes it had hidden.
+    pub fn restore_view(&mut self, positions: &[(String, f32, f32)], hidden: &[String]) {
+        for (id, x, y) in positions {
+            if let Some(&i) = self.g.index.get(id) {
+                self.pos[i as usize] = V2::new(*x, *y);
+            }
+        }
+        self.anim = None;
+        self.sim.running = false;
+        self.fit_requested = false;
+        self.manual_hidden = vec![false; self.g.n()];
+        for id in hidden {
+            if let Some(&i) = self.g.index.get(id) {
+                self.manual_hidden[i as usize] = true;
+            }
+        }
+    }
+
     pub fn restore_state(&mut self, positions: &[(String, f32, f32)], pinned: &[String], selected: &[String], hidden: &[String]) {
         let n = self.g.n();
         for (id, x, y) in positions {

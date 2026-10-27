@@ -172,6 +172,52 @@ fn combo_edge_ref(ui: &mut Ui, id: &str, current: &mut Option<crate::edgeattr::E
     changed
 }
 
+/// The colour palettes, and your own two-colour gradient (its two colours are picked below the list).
+fn palette_picker(ui: &mut Ui, id: &str, palette: &mut Palette) -> bool {
+    let mut changed = false;
+    row(ui, "Palette", |ui| {
+        ComboBox::from_id_salt(id).selected_text(palette.name()).show_ui(ui, |ui| {
+            for p in Palette::ALL {
+                changed |= ui.selectable_value(palette, p, p.name()).changed();
+            }
+            let own = matches!(palette, Palette::Custom(..));
+            if ui.selectable_label(own, Palette::CUSTOM.name()).clicked() && !own {
+                *palette = Palette::CUSTOM;
+                changed = true;
+            }
+        });
+    });
+    if let Palette::Custom(lo, hi) = palette {
+        row(ui, "From / to", |ui| {
+            changed |= ui.color_edit_button_srgb(lo).on_hover_text("Colour of the lowest values").changed();
+            ui.label("→");
+            changed |= ui.color_edit_button_srgb(hi).on_hover_text("Colour of the highest values").changed();
+        });
+    }
+    changed
+}
+
+/// A colour you can change, with the theme's colour until you do; "Default" goes back to it.
+fn own_color(ui: &mut Ui, label: &str, value: &mut Option<Rgb>, default: Rgb) -> bool {
+    let mut changed = false;
+    row(ui, label, |ui| {
+        let mut c = value.unwrap_or(default);
+        if ui.color_edit_button_srgb(&mut c).changed() {
+            *value = Some(c);
+            changed = true;
+        }
+        if value.is_some() {
+            if ui.small_button("Default").on_hover_text("Back to the theme's colour").clicked() {
+                *value = None;
+                changed = true;
+            }
+        } else {
+            ui.weak("default");
+        }
+    });
+    changed
+}
+
 fn edge_mode_name(m: EdgeColorMode) -> &'static str {
     match m {
         EdgeColorMode::Uniform => "Single colour",
@@ -478,14 +524,11 @@ impl App {
                     if numeric {
                         restyle |= ui.switch(&mut look.color_as_cat, "Treat values as categories").changed();
                     }
+                    if !numeric || look.color_as_cat {
+                        ui.weak("Click a colour in the Legend to change it.");
+                    }
                     if numeric && !look.color_as_cat {
-                        row(ui, "Palette", |ui| {
-                            ComboBox::from_id_salt("palette").selected_text(look.palette.name()).show_ui(ui, |ui| {
-                                for p in Palette::ALL {
-                                    restyle |= ui.selectable_value(&mut look.palette, p, p.name()).changed();
-                                }
-                            });
-                        });
+                        restyle |= palette_picker(ui, "palette", &mut look.palette);
                         ui.horizontal(|ui| {
                             restyle |= ui.switch(&mut look.invert, "Invert").changed();
                             restyle |= ui.switch(&mut look.log_scale, "Log scale").on_hover_text("Spread out skewed values (degree, PageRank …)").changed();
@@ -524,6 +567,10 @@ impl App {
                     }
                 });
             });
+            if look.edge_mode == EdgeColorMode::Uniform {
+                let d = look.default_edge();
+                restyle |= own_color(ui, "Edge colour", &mut look.edge_color, d);
+            }
             let edge_col = match look.edge_mode {
                 EdgeColorMode::Attribute => {
                     row(ui, "Attribute", |ui| {
@@ -546,15 +593,10 @@ impl App {
                     restyle |= ui.switch(&mut look.edge_as_cat, "Treat values as categories").on_hover_text("For the edge colours").changed();
                 }
                 if numeric && !look.edge_as_cat {
-                    row(ui, "Palette", |ui| {
-                        ComboBox::from_id_salt("edge_palette").selected_text(look.palette.name()).show_ui(ui, |ui| {
-                            for p in Palette::ALL {
-                                restyle |= ui.selectable_value(&mut look.palette, p, p.name()).changed();
-                            }
-                        });
-                    })
-                    .response
-                    .on_hover_text("Shared with the node colours");
+                    restyle |= palette_picker(ui, "edge_palette", &mut look.palette);
+                    ui.weak("The palette is shared with the node colours.");
+                } else {
+                    ui.weak("Click a colour in the Legend to change it.");
                 }
             }
             restyle |= self.edge_attr_builder(ui, cols);
@@ -582,7 +624,13 @@ impl App {
             row(ui, "Label text", |ui| {
                 combo_col(ui, "label_by", &mut look.label_by, cols, false, "(node id)");
             });
+            let d = look.default_text();
+            restyle |= own_color(ui, "Label colour", &mut look.label_color, d);
             ui.switch(&mut look.highlight_hood, "Fade all but the selection's neighbours");
+            ui.add_space(4.0);
+            crate::theme::heading(ui, "Background");
+            let d = look.default_background();
+            restyle |= own_color(ui, "Graph background", &mut look.background_color, d);
             if restyle {
                 self.restyle();
             }
@@ -955,11 +1003,17 @@ impl App {
         let edges = colours || st.width_legend.is_some() || !st.dash_legend.is_empty();
         let shapes = !st.shape_legend.is_empty();
         let solid = self.s.is_3d();
+        // a colour changed in the legend: (column, value, the new colour or None for the default)
+        let mut change: Option<(String, String, Option<Rgb>)> = None;
+        let look = &self.s.look;
+        let own = |c: &Option<String>| c.as_ref().is_some_and(|c| look.cat_colors.iter().any(|x| &x.0 == c));
         egui::ScrollArea::vertical().id_salt("legend_scroll").auto_shrink([false, false]).show(ui, |ui| {
             if edges || shapes {
                 theme::heading(ui, "Nodes");
             }
-            legend_body(ui, &st.legend, None);
+            if let Some(ch) = legend_body(ui, &st.legend, None, st.legend_col.as_deref(), own(&st.legend_col)) {
+                change = Some(ch);
+            }
             if shapes {
                 ui.add_space(4.0);
                 ui.label(format!("Shape: {}", st.shape_title));
@@ -985,7 +1039,9 @@ impl App {
             theme::heading(ui, "Edges");
             let ink = ui.visuals().text_color();
             if colours {
-                legend_body(ui, &st.edge_legend, Some(&st.edge_legend_title));
+                if let Some(ch) = legend_body(ui, &st.edge_legend, Some(&st.edge_legend_title), st.edge_legend_col.as_deref(), own(&st.edge_legend_col)) {
+                    change = Some(ch);
+                }
                 ui.add_space(4.0);
             }
             if let Some((title, lo, hi)) = &st.width_legend {
@@ -1019,6 +1075,14 @@ impl App {
                 }
             }
         });
+        if let Some((col, value, rgb)) = change {
+            if value.is_empty() && rgb.is_none() {
+                self.s.look.cat_colors.retain(|x| x.0 != col);
+            } else {
+                self.s.look.set_cat_color(&col, &value, rgb);
+            }
+            self.restyle();
+        }
     }
 
     /// One edge: its two ends, its direction and every edge attribute. With `links`, the ends can be clicked.
@@ -1055,8 +1119,10 @@ impl App {
     }
 }
 
-/// One legend: a swatch per category (a dot for nodes, a short line for edges), or the colour scale.
-fn legend_body(ui: &mut Ui, legend: &Legend, edge_title: Option<&str>) {
+/// One legend: a swatch per category (a dot for nodes, a short line for edges), or the colour scale. With `col`, the
+/// category colours can be clicked and changed; the change comes back as (column, value, colour or None for default).
+fn legend_body(ui: &mut Ui, legend: &Legend, edge_title: Option<&str>, col: Option<&str>, has_own: bool) -> Option<(String, String, Option<Rgb>)> {
+    let mut change = None;
     match legend {
         Legend::None => {
             ui.weak("Single colour");
@@ -1067,18 +1133,36 @@ fn legend_body(ui: &mut Ui, legend: &Legend, edge_title: Option<&str>) {
             }
             for (name, c, count) in items.iter().take(80) {
                 ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    let col = egui::Color32::from_rgb(c[0], c[1], c[2]);
-                    if edge_title.is_some() {
-                        ui.painter().line_segment([r.left_center(), r.right_center()], egui::Stroke::new(3.0, col));
-                    } else {
-                        ui.painter().circle_filled(r.center(), 5.5, col);
+                    match col {
+                        Some(colname) => {
+                            let mut rgb = *c;
+                            ui.spacing_mut().interact_size = egui::vec2(18.0, 14.0);
+                            // (no right-click menu here: it would share the picker's popup and close it at once)
+                            if ui.color_edit_button_srgb(&mut rgb).on_hover_text("Click to choose a colour").changed() {
+                                change = Some((colname.to_string(), name.clone(), Some(rgb)));
+                            }
+                        }
+                        None => {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                            let colr = egui::Color32::from_rgb(c[0], c[1], c[2]);
+                            if edge_title.is_some() {
+                                ui.painter().line_segment([r.left_center(), r.right_center()], egui::Stroke::new(3.0, colr));
+                            } else {
+                                ui.painter().circle_filled(r.center(), 5.5, colr);
+                            }
+                        }
                     }
                     ui.label(format!("{name}  ({count})"));
                 });
             }
             if items.len() > 80 {
                 ui.weak(format!("… {} more categories", items.len() - 80));
+            }
+            // back to the default colours of this list (an empty value stands for all of them)
+            if let (Some(colname), true) = (col, has_own) {
+                if ui.small_button("Default colours").on_hover_text("Forget the colours chosen for this list").clicked() {
+                    change = Some((colname.to_string(), String::new(), None));
+                }
             }
         }
         Legend::Continuous { name, lo, hi, palette, log, invert } => {
@@ -1105,6 +1189,7 @@ fn legend_body(ui: &mut Ui, legend: &Legend, edge_title: Option<&str>) {
             });
         }
     }
+    change
 }
 
 // ───────────────────────── subgraph ─────────────────────────

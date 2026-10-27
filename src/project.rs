@@ -47,6 +47,8 @@ pub struct ProjectFile {
     pub edge_attrs: Vec<crate::edgeattr::EdgeAttr>,
     /// Solids from an OBJ file: the file and how they are matched and placed.
     pub geometry: crate::geometry::GeoSettings,
+    /// Named views (Views menu).
+    pub views: Vec<crate::presets::NamedView>,
     pub layout: LayoutSettings,
     pub filter: FilterState,
     pub change: crate::changes::ChangeSettings,
@@ -78,6 +80,7 @@ impl Default for ProjectFile {
             look: Look::default(),
             edge_attrs: vec![],
             geometry: Default::default(),
+            views: vec![],
             layout: LayoutSettings::default(),
             filter: FilterState::default(),
             change: Default::default(),
@@ -158,6 +161,7 @@ impl App {
             look: s.look.clone(),
             edge_attrs: s.edge_attrs.clone(),
             geometry: s.geo_set.clone(),
+            views: self.views.clone(),
             layout: s.layout.clone(),
             filter: s.filter.clone(),
             change: s.change.clone(),
@@ -227,6 +231,7 @@ impl App {
     }
 
     pub fn new_project(&mut self) {
+        self.views.clear();
         self.s.edge_attrs.clear();
         self.s.clear_geometry();
         self.s.clear_all();
@@ -329,6 +334,7 @@ impl App {
         // ── settings, then the graph ──
         self.s.look = pf.look.clone();
         self.s.edge_attrs = pf.edge_attrs.clone();
+        self.views = pf.views.clone();
         self.s.layout = pf.layout.clone();
         self.s.filter = pf.filter.clone();
         self.s.change = pf.change.clone();

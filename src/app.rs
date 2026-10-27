@@ -86,9 +86,10 @@ pub struct App {
     pub applied_backdrop: Option<(crate::theme::Backdrop, bool, bool)>,
     /// The workspace templates the user saved (Window ▸ Workspaces).
     pub workspaces: Vec<crate::config::Workspace>,
-    /// Saved presets (Presets menu), and the name being typed for a new one.
+    /// Saved presets (Presets menu), the session's named views (Views menu), and the window naming a new one.
     pub presets: Vec<crate::presets::Preset>,
-    pub preset_name: String,
+    pub views: Vec<crate::presets::NamedView>,
+    pub name_dialog: Option<crate::presets::NameDialog>,
     /// The "save workspace" dialog: the name being typed.
     pub ws_dialog: Option<WsDialog>,
     /// Whether the interface was dark the last time the graph background was synced with it.
@@ -203,7 +204,8 @@ impl App {
             ws_name: String::new(),
             applied_backdrop: None,
             presets: vec![],
-            preset_name: String::new(),
+            views: vec![],
+            name_dialog: None,
             workspaces: vec![],
             ws_dialog: None,
             edge_draft: Default::default(),
@@ -655,6 +657,7 @@ impl App {
                 }
             });
             self.presets_menu(ui);
+            self.views_menu(ui);
             self.window_menu(ui);
             self.settings_button(ui);
             ui.menu_button("Help", |ui| {
@@ -674,6 +677,7 @@ impl App {
     fn dialogs(&mut self, ctx: &Context) {
         self.settings_dialog(ctx);
         self.workspace_dialog(ctx);
+        self.name_dialog(ctx);
         // import / remap dialog
         let mut commit = false;
         let mut cancel = false;
@@ -2101,10 +2105,10 @@ mod ui_tests {
         assert_eq!(h2.app.s.look.edge_dash_by, h.app.s.look.edge_dash_by);
         assert!(h2.app.s.style.edge_w.is_some());
         let back: crate::presets::Preset = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
-        assert_eq!(back.filter.edge_rules.len(), 1);
+        assert_eq!(back.settings.filter.edge_rules.len(), 1);
         // and a preset from a graph without these columns only drops what does not fit
         let mut odd = p.clone();
-        odd.look.edge_width_by = Some(EdgeRef { end: End::Edge, col: "no such column".into() });
+        odd.settings.look.edge_width_by = Some(EdgeRef { end: End::Edge, col: "no such column".into() });
         h2.app.apply_preset(&odd);
         assert!(h2.app.s.look.edge_width_by.is_none() && h2.app.s.look.edge_dash_by.is_some());
     }
@@ -2208,6 +2212,100 @@ f 2 4 8 6
         assert!(h2.app.error.is_none(), "{:?}", h2.app.error);
         assert_eq!(h2.app.s.geo_info.nodes, 4);
         assert_eq!(h2.app.s.geo_set.place, Place::FillBox);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn own_colours_presets_with_the_layout_tab_and_named_views() {
+        use crate::presets::{Naming, NameDialog};
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(5);
+
+        // your own colours: single edge colour, background, labels, a category, a two-colour gradient
+        h.app.s.look.edge_color = Some([200, 10, 10]);
+        h.app.s.look.background_color = Some([1, 2, 3]);
+        h.app.s.look.label_color = Some([9, 9, 9]);
+        assert_eq!((h.app.s.look.edge_base(), h.app.s.look.background(), h.app.s.look.text_color()), ([200, 10, 10], [1, 2, 3], [9, 9, 9]));
+        h.app.s.look.color_by = Some("group".into());
+        h.app.restyle();
+        let g = h.app.s.g.node_col("group").unwrap();
+        let first = g.label_at(0).unwrap();
+        h.app.s.look.set_cat_color("group", &first, Some([0, 255, 0]));
+        h.app.restyle();
+        assert_eq!(h.app.s.style.node_rgb[0], [0, 255, 0], "the node takes the colour chosen for its group");
+        assert_eq!(h.app.s.style.legend_col.as_deref(), Some("group"));
+        h.app.s.look.set_cat_color("group", &first, None);
+        h.app.restyle();
+        assert_ne!(h.app.s.style.node_rgb[0], [0, 255, 0], "and goes back to the default");
+        let custom = crate::style::Palette::Custom([0, 0, 0], [255, 255, 255]);
+        assert_eq!((custom.color(0.0), custom.color(1.0), custom.color(0.5)), ([0, 0, 0], [255, 255, 255], [128, 128, 128]));
+        // the Appearance tab and the legend draw with all of it
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Appearance);
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Legend);
+        h.app.dock = Some(dock);
+        h.frames(3);
+        // clicking a category's colour in the legend opens a colour picker
+        let row = h.last_texts.iter().find(|(t, _)| t.starts_with(&first) && t.contains('(')).map(|x| x.1).expect("a legend row for the first group");
+        h.click(egui::pos2(row.left() - 6.0, row.center().y), Modifiers::NONE);
+        h.frames(2);
+        assert!(h.ctx.any_popup_open(), "the legend's colour picker opens");
+        h.click(egui::pos2(5.0, 5.0), Modifiers::NONE);
+        h.frames(2);
+
+        // a preset keeps the Layout tab too: coordinates, 3D, bounding boxes
+        h.app.s.coords = crate::coords::CoordSettings { enabled: true, x: Some("age".into()), y: Some("score".into()), z: Some("tenure_years".into()), three_d: true, ..Default::default() };
+        h.app.s.apply_coords();
+        h.app.s.boxes.line_width = 3.5;
+        let preset = h.app.current_preset("mine");
+        let back: crate::presets::Preset = serde_json::from_str(&serde_json::to_string(&preset).unwrap()).unwrap();
+        assert!(back.settings.coords.enabled && back.settings.coords.three_d);
+        assert_eq!(back.settings.boxes.line_width, 3.5);
+        assert_eq!(back.settings.look.edge_color, Some([200, 10, 10]));
+        // an older presets.json (settings at the top level) still reads
+        let old: crate::presets::Preset = serde_json::from_str(r#"{"name":"old","look":{"node_size":9.0}}"#).unwrap();
+        assert_eq!(old.settings.look.node_size, 9.0);
+        let mut h2 = Harness::new();
+        h2.app.load_sample();
+        h2.frames(3);
+        h2.app.apply_preset(&back);
+        assert!(h2.app.s.is_3d(), "the preset turned the 3D coordinates view on");
+        assert_eq!(h2.app.s.look.edge_base(), [200, 10, 10]);
+
+        // the name window (a preset saved from it)
+        h.app.name_dialog = Some(NameDialog { what: Naming::Preset, name: "From the window".into() });
+        h.frames(2);
+        assert!(h.last_texts.iter().any(|(t, _)| t == "Save preset"));
+
+        // a named view: camera, section box, hidden nodes, all back after other changes
+        h.app.s.cam3.yaw = 1.234;
+        h.app.s.section.enabled = true;
+        h.app.s.section.min = [10.0, 0.0, 0.0];
+        h.app.s.manual_hidden[3] = true;
+        let id3 = h.app.s.g.ids[3].clone();
+        let view = h.app.current_view("Plant room");
+        h.app.views.push(view);
+        h.app.s.cam3.yaw = 0.1;
+        h.app.s.section.enabled = false;
+        h.app.s.show_all_hidden();
+        h.app.s.look.edge_color = None;
+        let v = h.app.views[0].clone();
+        h.app.open_view(&v);
+        assert!((h.app.s.cam3.yaw - 1.234).abs() < 1e-6);
+        assert!(h.app.s.section.enabled && h.app.s.section.min[0] == 10.0);
+        assert!(h.app.s.manual_hidden[3] && !h.app.s.vis[3]);
+        assert_eq!(h.app.s.look.edge_base(), [200, 10, 10]);
+        // views are kept in the session file
+        let dir = std::env::temp_dir().join(format!("graphsight-views-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("views.graphsight");
+        h.app.save_project_to(&file).unwrap();
+        let mut h3 = Harness::new();
+        h3.app.open_project(&file);
+        assert!(h3.app.error.is_none(), "{:?}", h3.app.error);
+        assert_eq!(h3.app.views.len(), 1);
+        assert_eq!(h3.app.views[0].hidden, vec![id3]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

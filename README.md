@@ -137,11 +137,22 @@ with their source, target and every edge attribute. Click a header to sort, a ro
 adds), double-click to zoom to it. Resting the pointer on an edge in the graph shows its details in a tooltip, and a
 selected edge is shown in the *Inspector*.
 
-**Presets** — the *Presets* menu saves the settings you have now under a name: the appearance (node and edge colours,
-sizes, edge widths and line styles, labels), the edge attributes made from both ends, the filters (node and edge rules,
-expression, search) and the layout settings. *Apply* puts them on whatever graph is loaded (settings for columns it does
-not have are skipped); a preset can also be replaced with the current settings or deleted. Presets are kept in
-`presets.json` in the settings folder, so they are there for every session.
+**Your own colours** — wherever the app picks a colour you can choose another one, and *Default* goes back:
+the edge colour when edges are a single colour, the label colour and the graph background (*Appearance*), and every
+category's colour, for nodes and edges alike, by clicking its swatch in the *Legend* (*Default colours* under the list
+forgets them). A colour chosen for a value follows that column everywhere it colours by category. Besides the built-in
+palettes, *Your own two colours* makes a gradient between two colours of your choice.
+
+**Presets** — *Presets ▸ Save the current settings as a preset…* keeps the settings you have now under a name: the
+appearance and your colours, the edge attributes made from both ends, the filters (node and edge rules, expression,
+search) and the *Layout* tab: the layout, node coordinates and the 3D view, bounding boxes and how geometry is placed.
+*Apply* puts them on whatever graph is loaded (settings for columns it does not have are skipped); a preset can also
+be replaced with the current settings or deleted. Presets are kept in `presets.json` in the settings folder, so they
+are there for every session.
+
+**Named views** — *Views ▸ Save the current view…* keeps the view exactly as it is: everything a preset keeps, plus
+the camera (2D or 3D), the section box, where every node is and which nodes are hidden. *Open* brings all of it back;
+a view can also be replaced with the view as it is now, or deleted. Views are saved in the session file.
 
 **Appearance** — *Settings* opens the settings window directly. Mode (System / Dark / Light), interface size, and a
 *Translucency* section: a Windows 11 window backdrop (None, Mica, Mica Alt, Acrylic) and how solid the panels, the graph

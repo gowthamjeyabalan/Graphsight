@@ -48,6 +48,8 @@ pub enum Palette {
     YlOrRd,
     Blues,
     CoolWarm,
+    /// A gradient between two colours of your own.
+    Custom(Rgb, Rgb),
 }
 
 impl Palette {
@@ -62,6 +64,7 @@ impl Palette {
             Palette::YlOrRd => "Yellow-Orange-Red",
             Palette::Blues => "Blues",
             Palette::CoolWarm => "Cool-Warm (diverging)",
+            Palette::Custom(..) => "Your own two colours",
         }
     }
 
@@ -73,10 +76,18 @@ impl Palette {
             Palette::YlOrRd => &[0xffffcc, 0xffeda0, 0xfed976, 0xfeb24c, 0xfd8d3c, 0xfc4e2a, 0xe31a1c, 0xbd0026, 0x800026],
             Palette::Blues => &[0xf7fbff, 0xdeebf7, 0xc6dbef, 0x9ecae1, 0x6baed6, 0x4292c6, 0x2171b5, 0x08519c, 0x08306b],
             Palette::CoolWarm => &[0x3b4cc0, 0x7b9ff9, 0xc0d4f5, 0xf2cbb7, 0xee8468, 0xb40426],
+            Palette::Custom(..) => &[],
         }
     }
 
+    /// The gradient a new "your own colours" palette starts with.
+    pub const CUSTOM: Palette = Palette::Custom([40, 70, 160], [245, 190, 50]);
+
     pub fn color(&self, t: f32) -> Rgb {
+        if let Palette::Custom(a, b) = self {
+            let t = t.clamp(0.0, 1.0);
+            return [0, 1, 2].map(|k| (a[k] as f32 + (b[k] as f32 - a[k] as f32) * t).round() as u8);
+        }
         let s = self.stops();
         let t = t.clamp(0.0, 1.0) * (s.len() - 1) as f32;
         let i = (t.floor() as usize).min(s.len() - 2);
