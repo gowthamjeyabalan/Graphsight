@@ -90,7 +90,9 @@ difference ignoring the sign, sum, mean, smaller or larger value. The edges are 
 listed under *Edge attribute* like the columns of the edges file. It is kept in the session and made again whenever the
 data is reloaded; the × next to it removes it.
 
-**Filtering** — combine any of: search box (id and text columns); per-attribute rules (numeric range, category
+**Filtering** — combine any of: search box (id and text columns; several values separated by commas, e.g.
+`n12, n40, Pump` — a value that is exactly a node id finds that node only, other text finds ids and texts containing it;
+*Select the N found* selects them all); per-attribute rules (numeric range, category
 checklist); a free-form expression; hand-hiding (select ▸ Hide / Isolate). Filtered-out nodes are hidden or dimmed.
 **Edge rules** (*Filter ▸ Edges ▸ Add edge rule*) do the same for edges: a range or ticked categories of any edge
 attribute, including the ones made from both ends. Edges that fail a rule are hidden or dimmed like filtered-out nodes;
@@ -131,6 +133,14 @@ selection has been cleared) bring the panels back.
 
 **Nodes table columns** — right-click a column header to hide it, Ctrl+click headers to pick several, or use the
 *Columns* button above the table to tick columns on and off, hide the picked ones and *Show all* again.
+
+**Walking the graph** — select one node and use the arrow keys: **→** steps along an edge, **↑ / ↓** choose which
+neighbour comes next when there are several, **←** goes back the way you came, **Esc** stops (a second Esc clears the
+selection). Steps follow the edge directions (*Along arrows*), go against them (*Against*) or take any edge; places
+not visited yet are offered first. The path is drawn over the graph as a numbered blue trail with rings on its nodes,
+and thin lines show the next steps (the chosen one dashed), so the graph's own colours stay as they are. The rest of
+the graph can stay *As is*, be *Dimmed* or *Hidden*. A small panel at the bottom left shows where you are and what is
+next, and the view follows when the walk reaches the edge of the screen.
 
 **Edges table and edge details** — the *Edges* tab (next to *Nodes*, or *Window ▸ Edges*) lists the edges on show
 with their source, target and every edge attribute. Click a header to sort, a row to select that edge (Ctrl/Shift+click
@@ -224,6 +234,7 @@ graphsight --help
 | `edgeattr.rs` | edge attributes made from the nodes at both ends (pair, same / different, difference …) |
 | `geometry.rs` | OBJ solids: reading, matching objects to nodes by name, placing and shading them in 3D |
 | `shapes.rs` | the ten node shapes: flat outlines, the solids for 3D, shading and drawing |
+| `walk.rs` | walking the graph with the arrow keys: the path, the next steps, going back |
 | `presets.rs` | named presets of the appearance, edge attributes, filters and layout settings (`presets.json`) |
 | `expr.rs` | filter expression parser/evaluator |
 | `changes.rs` | finds the connections where an attribute changes, with per-value counts |

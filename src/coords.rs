@@ -544,7 +544,7 @@ mod tests {
         let size = V2::new(800.0, 600.0);
         let cam = ViewCam::default();
         let none = vec![false; 4];
-        let hi = Highlight { focus: &none, hood: &none, active: false };
+        let hi = Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
         let mut dl = DrawList::default();
         build_draw_list(&s, &cam, size, &hi, &mut dl);
         assert_eq!(dl.nodes.len(), 4);

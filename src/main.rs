@@ -23,6 +23,7 @@ mod project;
 mod query;
 mod toolbar;
 mod view;
+mod walk;
 mod render;
 mod section;
 mod shapes;

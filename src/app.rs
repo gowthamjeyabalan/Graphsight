@@ -52,6 +52,15 @@ pub struct App {
     pub hi_key: (Option<usize>, u64, bool),
     pub hi_active: bool,
     pub hover: Option<usize>,
+    /// Walking the graph with the arrow keys: the walk, which edges it follows, how the rest looks, the edges that
+    /// stand out while walking, and what the highlight was last worked out for.
+    pub walk: Option<crate::walk::Walk>,
+    pub walk_follow: crate::walk::Follow,
+    pub walk_rest: crate::walk::Rest,
+    pub hi_edges: Vec<bool>,
+    pub walk_hi_key: Option<(u64, u8)>,
+    /// A text box had the keys in the last frame.
+    pub was_typing: bool,
     /// The edge under the pointer when no node is, and where the pointer and camera were when it was looked up.
     pub hover_edge: Option<usize>,
     pub hover_edge_at: Option<(Vec2, ViewCam)>,
@@ -181,6 +190,12 @@ impl App {
             hi_active: false,
             hover_edge: None,
             hover_edge_at: None,
+            walk: None,
+            walk_follow: Default::default(),
+            walk_rest: Default::default(),
+            hi_edges: vec![],
+            was_typing: false,
+            walk_hi_key: None,
             hover: None,
             drag_node: None,
             box_start: None,
@@ -246,6 +261,7 @@ impl App {
     }
 
     pub fn after_graph_change(&mut self) {
+        self.walk = None;
         self.table.dirty = true;
         self.etable.dirty = true;
         self.hi_key = (None, u64::MAX, false);
@@ -1670,7 +1686,7 @@ mod ui_tests {
         h.frames(30);
         let size = h.app.canvas_rect.size();
         let none = vec![false; h.app.s.g.n()];
-        let hi = Highlight { focus: &none, hood: &none, active: false };
+        let hi = Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
         let mut dl = DrawList::default();
         let t = Instant::now();
         for _ in 0..20 {
@@ -2307,6 +2323,65 @@ f 2 4 8 6
         assert_eq!(h3.app.views.len(), 1);
         assert_eq!(h3.app.views[0].hidden, vec![id3]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arrow_keys_walk_the_graph_and_search_takes_several_values() {
+        use crate::walk::Rest;
+        use egui::Key;
+        let mut h = Harness::new();
+        h.app.load_sample();
+        h.frames(5);
+        // a node with a few neighbours
+        let start = (0..h.app.s.g.n()).find(|&i| h.app.s.g.degree(i) >= 3).unwrap();
+        h.app.s.select_only(start);
+        h.frames(2);
+        // → starts the walk and takes the first step
+        h.press_plain(Key::ArrowRight);
+        let w = h.app.walk.as_ref().expect("walking");
+        assert_eq!(w.path.len(), 2);
+        let first = w.current() as usize;
+        assert!(h.app.s.sel[first] && h.app.s.sel_count == 1, "the step selects the new node");
+        assert!(h.app.s.g.neighbors(start).contains(&(first as u32)));
+        // ↓ chooses another next step, → takes it
+        let before = h.app.walk.as_ref().unwrap().pick;
+        h.press_plain(Key::ArrowDown);
+        assert_ne!(h.app.walk.as_ref().unwrap().pick, before);
+        let picked = h.app.walk.as_ref().unwrap().picked().unwrap().1;
+        h.press_plain(Key::ArrowRight);
+        assert_eq!(h.app.walk.as_ref().unwrap().current(), picked);
+        // ← goes back the same way
+        h.press_plain(Key::ArrowLeft);
+        h.press_plain(Key::ArrowLeft);
+        assert_eq!(h.app.walk.as_ref().unwrap().current() as usize, start);
+        assert!(h.app.s.sel[start]);
+        // the rest of the graph: hidden leaves only the path and the next steps
+        h.press_plain(Key::ArrowRight);
+        h.app.walk_rest = Rest::Hide;
+        h.app.walk_hi_key = None;
+        h.frames(2);
+        let marked = h.app.walk.as_ref().unwrap().marks(h.app.s.g.n(), h.app.s.g.edges.len()).0.iter().filter(|x| **x).count();
+        assert!(h.app.draw.nodes.len() <= marked && h.app.draw.nodes.len() >= 2, "{} drawn, {marked} marked", h.app.draw.nodes.len());
+        // as is: everything drawn again
+        h.app.walk_rest = Rest::AsIs;
+        h.frames(2);
+        assert!(h.app.draw.nodes.len() > marked);
+        // Esc stops the walk but keeps the node selected; a second Esc clears it
+        let at = h.app.walk.as_ref().unwrap().current() as usize;
+        h.press_plain(Key::Escape);
+        assert!(h.app.walk.is_none() && h.app.s.sel[at]);
+        h.press_plain(Key::Escape);
+        assert_eq!(h.app.s.sel_count, 0);
+
+        // several values in the search box: exact ids find only themselves, other text finds what contains it
+        h.app.s.filter.search = "n1, N2".into();
+        h.app.refilter();
+        assert_eq!(h.app.s.n_vis, 2, "n1 and n2, not n10, n11 …");
+        h.app.s.filter.search = "n5, person 12".into();
+        h.app.refilter();
+        let shown: Vec<&str> = (0..h.app.s.g.n()).filter(|&i| h.app.s.vis[i]).map(|i| h.app.s.g.ids[i].as_str()).collect();
+        assert!(shown.contains(&"n5") && shown.contains(&"n12") && shown.contains(&"n120"), "{shown:?}");
+        assert!(!shown.contains(&"n50"));
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub fn render_png(s: &Session, cam: &ViewCam, w: u32, h: u32, scale: f32) -> Opt
     pm.fill(Color::from_rgba8(bg[0], bg[1], bg[2], 255));
     let size = V2::new(w as f32 / scale, h as f32 / scale);
     let none = none_highlight(s.g.n());
-    let hi = Highlight { focus: &none, hood: &none, active: false };
+    let hi = Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
     let mut dl = DrawList::default();
     build_draw_list(s, cam, size, &hi, &mut dl);
     let tf = Transform::from_scale(scale, scale);
@@ -180,7 +180,7 @@ pub fn render_svg(s: &Session, cam: &ViewCam, w: f32, h: f32) -> String {
     use std::fmt::Write;
     let size = V2::new(w, h);
     let none = none_highlight(s.g.n());
-    let hi = Highlight { focus: &none, hood: &none, active: false };
+    let hi = Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
     let mut dl = DrawList::default();
     build_draw_list(s, cam, size, &hi, &mut dl);
     let bg = s.look.background();

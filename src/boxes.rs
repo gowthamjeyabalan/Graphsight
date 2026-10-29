@@ -341,7 +341,7 @@ mod tests {
         use crate::model::*;
         let size = egui::Vec2::new(800.0, 600.0);
         let none = vec![false; s.g.n()];
-        let hi = Highlight { focus: &none, hood: &none, active: false };
+        let hi = Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
         let mut dl = DrawList::default();
         build_draw_list(s, &ViewCam::default(), size, &hi, &mut dl);
         dl
@@ -455,7 +455,7 @@ mod tests {
             let size = egui::Vec2::new(800.0, 600.0);
             let none = vec![false; s.g.n()];
             let mut dl = DrawList::default();
-            build_draw_list(s, &s.fit_camera(size), size, &Highlight { focus: &none, hood: &none, active: false }, &mut dl);
+            build_draw_list(s, &s.fit_camera(size), size, &Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false }, &mut dl);
             dl
         };
         let mut s = session();

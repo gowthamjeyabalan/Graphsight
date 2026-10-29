@@ -859,15 +859,20 @@ impl Session {
             Ok(None) => self.expr_error = None,
             Err(e) => self.expr_error = Some(e),
         }
-        let q = self.filter.search.trim().to_lowercase();
-        if !q.is_empty() {
+        // several values separated by commas: a node passes if it matches any of them. A value that is exactly a node's
+        // id finds that node only (so "n1" does not also find n10, n11 …); others find ids and texts containing them.
+        let terms: Vec<String> = self.filter.search.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect();
+        if !terms.is_empty() {
+            let ids_lower: std::collections::HashSet<String> = g.ids.iter().map(|s| s.to_lowercase()).collect();
+            let (exact, partial): (Vec<&String>, Vec<&String>) = terms.iter().partition(|t| ids_lower.contains(t.as_str()));
             for i in 0..n {
                 if !vis[i] {
                     continue;
                 }
-                let mut hit = contains_ci(&g.ids[i], &q);
-                if !hit {
-                    hit = g.node_cols.iter().any(|c| !c.is_metric && c.cat_str(i).is_some_and(|s| contains_ci(s, &q)));
+                let id = g.ids[i].to_lowercase();
+                let mut hit = exact.iter().any(|t| **t == id) || partial.iter().any(|t| id.contains(t.as_str()));
+                if !hit && !partial.is_empty() {
+                    hit = g.node_cols.iter().any(|c| !c.is_metric && c.cat_str(i).is_some_and(|s| partial.iter().any(|t| contains_ci(s, t))));
                 }
                 vis[i] = hit;
             }
@@ -1781,6 +1786,10 @@ pub struct Highlight<'a> {
     pub focus: &'a [bool],
     pub hood: &'a [bool],
     pub active: bool,
+    /// The edges that stand out (walking the graph); None: those touching a focused node.
+    pub edges: Option<&'a [bool]>,
+    /// Hide what does not stand out, instead of fading it.
+    pub hide: bool,
 }
 
 pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out: &mut DrawList) {
@@ -1874,7 +1883,10 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         } else if !both {
             alpha *= 0.12;
             kind = 1;
-        } else if hi.active && !(hi.focus[ai] || hi.focus[bi]) {
+        } else if hi.active && !hi.edges.map_or(hi.focus[ai] || hi.focus[bi], |es| es.get(e).copied().unwrap_or(false)) {
+            if hi.hide {
+                return None;
+            }
             alpha *= 0.12;
             kind = 1;
         } else if hi.active {
@@ -2030,6 +2042,9 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         } else if !visible {
             alpha = 0.12;
         } else if hi.active && !hi.hood[i] {
+            if hi.hide {
+                continue;
+            }
             alpha = 0.15;
         }
         if s.sub_info.as_ref().is_some_and(|si| si.connector[i]) {
@@ -2366,7 +2381,7 @@ mod tests {
         let cam = s.fit_camera(size);
         let mut dl = DrawList::default();
         let none = vec![false; s.g.n()];
-        let hi = Highlight { focus: &none, hood: &none, active: false };
+        let hi = Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
         build_draw_list(&s, &cam, size, &hi, &mut dl);
         assert_eq!(dl.nodes.len(), 6);
         assert_eq!(dl.edges.len() + dl.edges_back.len(), 5);

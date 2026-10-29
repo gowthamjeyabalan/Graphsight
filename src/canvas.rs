@@ -148,6 +148,25 @@ fn col(rgba: [u8; 4]) -> Color32 {
 impl App {
     fn update_highlight(&mut self) {
         let n = self.s.g.n();
+        // a walk stops when the selection is no longer its current node
+        if self.walk.as_ref().is_some_and(|w| self.s.sel_count != 1 || !self.s.sel.get(w.current() as usize).copied().unwrap_or(false)) {
+            self.walk = None;
+        }
+        if let Some(w) = &self.walk {
+            // while walking: the path and the next steps stand out; the rest as chosen
+            let key = (w.version, self.walk_rest as u8);
+            if Some(key) != self.walk_hi_key || self.focus.len() != n {
+                let (nodes, edges) = w.marks(n, self.s.g.edges.len());
+                self.focus = nodes.clone();
+                self.hood = nodes;
+                self.hi_edges = edges;
+                self.hi_active = self.walk_rest != crate::walk::Rest::AsIs;
+                self.walk_hi_key = Some(key);
+                self.hi_key = (None, u64::MAX, false);
+            }
+            return;
+        }
+        self.walk_hi_key = None;
         let hover_key = if self.s.sel_count == 0 { self.hover } else { None };
         let key = (hover_key, self.s.sel_version, self.s.look.highlight_hood);
         if key == self.hi_key && self.focus.len() == n {
@@ -246,7 +265,14 @@ impl App {
         }
 
         self.update_highlight();
-        let hi = Highlight { focus: &self.focus, hood: &self.hood, active: self.hi_active };
+        let walk_edges = self.walk.is_some() && self.walk_rest != crate::walk::Rest::AsIs;
+        let hi = Highlight {
+            focus: &self.focus,
+            hood: &self.hood,
+            active: self.hi_active,
+            edges: if walk_edges { Some(&self.hi_edges) } else { None },
+            hide: walk_edges && self.walk_rest == crate::walk::Rest::Hide,
+        };
         // a huge graph is drawn thinner while it is dragged or zoomed, and in full as soon as the pointer rests
         let moving = resp.dragged() || (resp.hovered() && ui.input(|i| i.smooth_scroll_delta != Vec2::ZERO));
         let many = self.s.g.edges.len() / LOD_EDGES;
@@ -259,6 +285,7 @@ impl App {
         self.prof.add(2, t_b);
         let t_p = std::time::Instant::now();
         self.paint_graph(&painter, rect);
+        self.paint_walk(&painter, rect);
         self.paint_labels(&painter, rect);
         self.paint_section(&painter, rect);
         self.paint_overlays(&painter, rect);
@@ -274,6 +301,7 @@ impl App {
         }
 
         self.maximize_button(ui, rect);
+        self.walk_panel(ui, rect);
 
         // tooltip
         if let (Some(e), None, None, true) = (self.hover_edge, self.hover, self.box_start, self.settings.show_tooltips && self.section_drag.is_none()) {
@@ -647,8 +675,11 @@ impl App {
             }
         }
 
-        // keyboard
-        if !ui.ctx().egui_wants_keyboard_input() {
+        // keyboard (not while typing, nor in the frame a text box let go of the keys: Esc that leaves a search box
+        // must not also clear the selection)
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        let was_typing = std::mem::replace(&mut self.was_typing, typing);
+        if !typing && !was_typing {
             self.view_keys(ui);
             let (esc, del, all, space) = ui.input(|i| {
                 (
@@ -661,8 +692,26 @@ impl App {
             // Space + drag pans, so the layout is paused or resumed when Space is let go without a drag
             let space_pan = space && std::mem::take(&mut self.view.space_used);
             let space = space && !space_pan;
+            // arrow keys walk the graph from the selected node
+            let (left, right, up, down) = ui.input(|i| {
+                let plain = i.modifiers.is_none();
+                (
+                    plain && i.key_pressed(egui::Key::ArrowLeft),
+                    plain && i.key_pressed(egui::Key::ArrowRight),
+                    plain && i.key_pressed(egui::Key::ArrowUp),
+                    plain && i.key_pressed(egui::Key::ArrowDown),
+                )
+            });
+            if left || right || up || down {
+                self.walk_key(ui.ctx(), left, right, up, down);
+            }
             if esc {
-                self.s.clear_selection();
+                // the first Esc stops a walk (keeping the node selected), the next clears the selection
+                if self.walk.is_some() {
+                    self.walk = None;
+                } else {
+                    self.s.clear_selection();
+                }
             }
             if del && self.s.sel_count > 0 {
                 self.s.hide_selected();
@@ -1242,3 +1291,172 @@ fn dashed_line(sink: &mut MeshSink, a: Pos2, b: Pos2, w: f32, dash: u8, c: Color
         guard += 1;
     }
 }
+
+// ───────────────────────── walking the graph ─────────────────────────
+
+impl App {
+    /// An arrow key: start a walk at the selected node, or step, go back, or choose the next step.
+    pub fn walk_key(&mut self, ctx: &egui::Context, left: bool, right: bool, _up: bool, down: bool) {
+        use crate::walk::Walk;
+        let sel = self.s.selected_list();
+        let on_track = self.walk.as_ref().is_some_and(|w| sel.len() == 1 && sel[0] == w.current());
+        if !on_track {
+            if sel.len() != 1 {
+                self.toast(ctx, "Select one node, then use the arrow keys to walk the graph from it");
+                return;
+            }
+            self.walk = Some(Walk::start(&self.s.g, sel[0], self.walk_follow, &self.walk_shown()));
+            if !right && !left {
+                // the first ↑ / ↓ only starts the walk and shows the choices
+                return;
+            }
+        }
+        let follow = self.walk_follow;
+        let shown = self.walk_shown();
+        let Some(w) = self.walk.as_mut() else { return };
+        let mut stuck = false;
+        let moved = if right {
+            let ok = w.forward(&self.s.g, follow, &shown);
+            stuck = !ok;
+            ok
+        } else if left {
+            w.back(&self.s.g, follow, &shown)
+        } else {
+            w.choose(if down { 1 } else { -1 });
+            false
+        };
+        let at = w.current() as usize;
+        if moved {
+            self.s.select_only(at);
+            self.keep_in_view(at);
+        }
+        if stuck {
+            self.toast(ctx, "No way on from here (try another direction in the walk panel)");
+        }
+    }
+
+    /// The nodes a walk may go through: everything on show, and what only the filter takes out (a node picked with
+    /// the search box can still be walked from), but not nodes hidden by hand or outside a sub-graph.
+    fn walk_shown(&self) -> Vec<bool> {
+        (0..self.s.g.n()).map(|i| self.s.vis[i] || self.s.dimmed.get(i).copied().unwrap_or(false)).collect()
+    }
+
+    /// Bring a node into view when it is near the edge of the graph or outside it.
+    fn keep_in_view(&mut self, i: usize) {
+        let size = self.canvas_size;
+        let Some((p, _, _)) = self.s.projector(&self.cam, size).at(&self.s, i) else { return };
+        let inside = p.x > size.x * 0.12 && p.x < size.x * 0.88 && p.y > size.y * 0.12 && p.y < size.y * 0.88;
+        if inside {
+            return;
+        }
+        if self.s.is_3d() {
+            self.s.cam3.target = self.s.pos3[i];
+        } else {
+            self.cam.center = self.s.pos[i];
+            self.auto_fit = false;
+        }
+    }
+
+    /// The walk drawn over the graph: the path as a bright band with step numbers, rings on its nodes, and thin
+    /// lines to the possible next steps (the chosen one stronger). Colours of the graph itself are left alone.
+    fn paint_walk(&self, painter: &Painter, rect: Rect) {
+        let Some(w) = &self.walk else { return };
+        let off = rect.min.to_vec2();
+        let proj = self.s.projector(&self.cam, self.canvas_size);
+        let at = |i: u32| proj.at(&self.s, i as usize).map(|(p, f, _)| (Pos2::new(p.x, p.y) + off, node_radius_px(self.s.style.node_r[i as usize], f)));
+        let accent = Color32::from_rgb(10, 132, 255);
+        let glow = Color32::from_rgba_unmultiplied(10, 132, 255, 70);
+        let width = self.s.look.edge_width;
+        // the next steps: thin lines, the chosen one stronger and dashed
+        if let Some((from, _)) = at(w.current()) {
+            for (k, &(_, v)) in w.next.iter().enumerate() {
+                let Some((to, r)) = at(v) else { continue };
+                if k == w.pick {
+                    painter.extend(Shape::dashed_line(&[from, to], Stroke::new((width * 2.0).max(2.5), accent), 7.0, 4.0));
+                    painter.circle_stroke(to, r + 4.0, Stroke::new(2.0, accent));
+                } else {
+                    painter.line_segment([from, to], Stroke::new((width * 1.2).max(1.2), Color32::from_rgba_unmultiplied(10, 132, 255, 110)));
+                    painter.circle_stroke(to, r + 3.0, Stroke::new(1.0, Color32::from_rgba_unmultiplied(10, 132, 255, 150)));
+                }
+            }
+        }
+        // the path: a soft wide band under a firm line
+        for pair in w.path.windows(2) {
+            if let (Some((a, _)), Some((b, _))) = (at(pair[0].0), at(pair[1].0)) {
+                painter.line_segment([a, b], Stroke::new((width * 5.0).max(7.0), glow));
+                painter.line_segment([a, b], Stroke::new((width * 2.0).max(2.5), accent));
+            }
+        }
+        let font = egui::FontId::proportional(11.0);
+        let last = w.path.len() - 1;
+        for (k, &(v, _)) in w.path.iter().enumerate() {
+            let Some((p, r)) = at(v) else { continue };
+            if k == last {
+                painter.circle_stroke(p, r + 6.0, Stroke::new(3.0, accent));
+                painter.circle_stroke(p, r + 10.0, Stroke::new(1.0, glow));
+            } else {
+                painter.circle_stroke(p, r + 3.5, Stroke::new(2.0, accent));
+            }
+            let label = Pos2::new(p.x + r + 7.0, p.y - r - 7.0);
+            painter.circle_filled(label, 8.0, accent);
+            painter.text(label, Align2::CENTER_CENTER, (k + 1).to_string(), font.clone(), Color32::WHITE);
+        }
+    }
+
+    /// The small panel at the top of the graph while walking: where you are, what is next, and the choices.
+    fn walk_panel(&mut self, ui: &mut Ui, rect: Rect) {
+        use crate::theme::UiExt;
+        use crate::walk::{Follow, Rest};
+        let Some(w) = &self.walk else { return };
+        let here = self.s.label_of(w.current() as usize);
+        let next = w.picked().map(|(_, v)| self.s.label_of(v as usize));
+        let (step, count, pick) = (w.path.len(), w.next.len(), w.pick);
+        let mut follow = self.walk_follow;
+        let mut rest = self.walk_rest;
+        let mut stop = false;
+        // bottom left, where it covers the least of the graph
+        egui::Area::new(egui::Id::unique("walk_panel")).pivot(Align2::LEFT_BOTTOM).fixed_pos(rect.left_bottom() + Vec2::new(10.0, -64.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(330.0);
+                ui.horizontal(|ui| {
+                    ui.label(crate::theme::semibold(format!("Walking · step {step}")));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Stop").on_hover_text("Esc").clicked() {
+                            stop = true;
+                        }
+                    });
+                });
+                ui.label(format!("At {here}"));
+                match &next {
+                    Some(n) => ui.label(format!("Next ({} of {count}): {n}", pick + 1)),
+                    None => ui.weak("No way on from here"),
+                };
+                ui.add_space(4.0);
+                ui.segmented(&mut follow, &[(Follow::Out, "Along arrows"), (Follow::In, "Against"), (Follow::Both, "Any edge")]);
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.weak("Rest of the graph");
+                    ui.segmented(&mut rest, &[(Rest::AsIs, "As is"), (Rest::Dim, "Dimmed"), (Rest::Hide, "Hidden")]);
+                });
+                ui.add_space(2.0);
+                ui.weak("→ step   ← back   ↑ ↓ choose the next step   Esc stop");
+            });
+        });
+        if stop {
+            self.walk = None;
+            return;
+        }
+        if rest != self.walk_rest {
+            self.walk_rest = rest;
+            self.walk_hi_key = None;
+        }
+        if follow != self.walk_follow {
+            self.walk_follow = follow;
+            let shown = self.walk_shown();
+            if let Some(w) = self.walk.as_mut() {
+                w.refresh(&self.s.g, follow, &shown);
+            }
+        }
+    }
+}
+

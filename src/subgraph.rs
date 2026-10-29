@@ -531,7 +531,7 @@ mod tests {
         s.apply_subgraph();
         assert_eq!(s.n_vis, 4);
         assert_eq!(s.n_vis_edges, 3, "the real edge a-b plus the two bridges");
-        let hi = crate::model::Highlight { focus: &vec![false; 9], hood: &vec![false; 9], active: false };
+        let hi = crate::model::Highlight { focus: &vec![false; 9], hood: &vec![false; 9], active: false, edges: None, hide: false };
         let mut dl = crate::model::DrawList::default();
         crate::model::build_draw_list(&s, &crate::model::ViewCam::default(), egui::Vec2::new(800.0, 600.0), &hi, &mut dl);
         assert_eq!(dl.nodes.len(), 4);
@@ -688,7 +688,7 @@ mod tests {
         s.apply_subgraph();
         assert_eq!((s.n_vis, s.n_vis_edges), (2, 1));
         let none = vec![false; 3];
-        let hi = crate::model::Highlight { focus: &none, hood: &none, active: false };
+        let hi = crate::model::Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
         let mut dl = crate::model::DrawList::default();
         crate::model::build_draw_list(&s, &crate::model::ViewCam::default(), egui::Vec2::new(800.0, 600.0), &hi, &mut dl);
         assert!(dl.edges.iter().any(|e| e.directed), "the arrow head sits on the new link");

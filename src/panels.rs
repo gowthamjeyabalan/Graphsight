@@ -655,7 +655,21 @@ impl App {
                 ui.label(theme::secondary("Nodes that do not pass"));
                 ui.segmented(&mut self.s.look.filtered, &[(FilteredMode::Dim, "Dim"), (FilteredMode::Hide, "Hide")]);
             });
-            changed |= ui.add(egui::TextEdit::singleline(&mut self.s.filter.search).id_salt("filter_search").hint_text("Search id or text…").desired_width(f32::INFINITY)).changed();
+            changed |= ui
+                .add(egui::TextEdit::singleline(&mut self.s.filter.search).id_salt("filter_search").hint_text("Search id or text… (several: n12, n40, Pump)").desired_width(f32::INFINITY))
+                .on_hover_text("Separate several ids or texts with commas. An exact id finds that node only; other text finds ids and texts that contain it.")
+                .changed();
+            // always shown (enabled only with a search), so the boxes below keep their place
+            let searching = !self.s.filter.search.trim().is_empty();
+            let found = self.s.n_vis;
+            if ui.add_enabled(searching && found > 0, egui::Button::new(if searching { format!("Select the {found} found") } else { "Select the found nodes".to_string() })).clicked() {
+                self.s.clear_selection();
+                for i in 0..self.s.g.n() {
+                    if self.s.vis[i] {
+                        self.s.set_selected(i, true);
+                    }
+                }
+            }
             let resp = ui.add(egui::TextEdit::singleline(&mut self.s.filter.expr_text).id_salt("filter_expr").hint_text("Expression: score > 3 and group == \"A\"").desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
             changed |= resp.changed();
             resp.on_hover_text("Operators: == != < <= > >=  contains  startswith  in [a, b]  and  or  not  ( )\nUse `backticks` for column names with spaces. See Help for more.");

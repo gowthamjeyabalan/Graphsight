@@ -254,7 +254,7 @@ mod tests {
         let size = egui::Vec2::new(400.0, 300.0);
         let cam = s.fit_camera(size);
         let none = vec![false; s.g.n()];
-        let hi = Highlight { focus: &none, hood: &none, active: false };
+        let hi = Highlight { focus: &none, hood: &none, active: false, edges: None, hide: false };
         let mut dl = DrawList::default();
         build_draw_list(&s, &cam, size, &hi, &mut dl);
         assert_eq!(dl.edges_hi.len(), 1);
