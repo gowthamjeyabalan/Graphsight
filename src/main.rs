@@ -11,6 +11,7 @@ mod coords;
 mod data;
 mod dock;
 mod edgeattr;
+mod explore;
 mod expr;
 mod geometry;
 mod graph;
@@ -31,6 +32,7 @@ mod style;
 mod subgraph;
 mod table;
 mod theme;
+mod timebar;
 
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;

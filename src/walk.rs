@@ -4,6 +4,32 @@
 
 use crate::graph::Graph;
 use crate::data::natural_cmp;
+use serde::{Deserialize, Serialize};
+
+/// A saved walk with a note at each stop, played back with the arrow keys (kept in the session).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tour {
+    pub name: String,
+    pub stops: Vec<TourStop>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TourStop {
+    /// The node, by id.
+    pub id: String,
+    pub note: String,
+}
+
+/// A tour being played: which tour, which stop, and its stops as nodes (stops whose node is not in the graph are
+/// left out) with the index of each in the tour.
+pub struct TourPlay {
+    pub tour: usize,
+    pub pos: usize,
+    pub nodes: Vec<u32>,
+    pub stop: Vec<usize>,
+}
 
 /// Which edges a step may follow from the current node.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

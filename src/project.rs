@@ -49,6 +49,10 @@ pub struct ProjectFile {
     pub geometry: crate::geometry::GeoSettings,
     /// Named views (Views menu).
     pub views: Vec<crate::presets::NamedView>,
+    /// Saved walks with notes (Views ▸ Tours).
+    pub tours: Vec<crate::walk::Tour>,
+    /// The time bar.
+    pub time: crate::timebar::TimeSettings,
     pub layout: LayoutSettings,
     pub filter: FilterState,
     pub change: crate::changes::ChangeSettings,
@@ -81,6 +85,8 @@ impl Default for ProjectFile {
             edge_attrs: vec![],
             geometry: Default::default(),
             views: vec![],
+            tours: vec![],
+            time: Default::default(),
             layout: LayoutSettings::default(),
             filter: FilterState::default(),
             change: Default::default(),
@@ -162,6 +168,8 @@ impl App {
             edge_attrs: s.edge_attrs.clone(),
             geometry: s.geo_set.clone(),
             views: self.views.clone(),
+            tours: self.tours.clone(),
+            time: s.time.clone(),
             layout: s.layout.clone(),
             filter: s.filter.clone(),
             change: s.change.clone(),
@@ -232,6 +240,8 @@ impl App {
 
     pub fn new_project(&mut self) {
         self.views.clear();
+        self.tours.clear();
+        self.s.time = Default::default();
         self.s.edge_attrs.clear();
         self.s.clear_geometry();
         self.s.clear_all();
@@ -335,6 +345,8 @@ impl App {
         self.s.look = pf.look.clone();
         self.s.edge_attrs = pf.edge_attrs.clone();
         self.views = pf.views.clone();
+        self.tours = pf.tours.clone();
+        self.s.time = pf.time.clone();
         self.s.layout = pf.layout.clone();
         self.s.filter = pf.filter.clone();
         self.s.change = pf.change.clone();

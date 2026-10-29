@@ -152,21 +152,33 @@ impl App {
         if self.walk.as_ref().is_some_and(|w| self.s.sel_count != 1 || !self.s.sel.get(w.current() as usize).copied().unwrap_or(false)) {
             self.walk = None;
         }
-        if let Some(w) = &self.walk {
-            // while walking: the path and the next steps stand out; the rest as chosen
-            let key = (w.version, self.walk_rest as u8);
-            if Some(key) != self.walk_hi_key || self.focus.len() != n {
-                let (nodes, edges) = w.marks(n, self.s.g.edges.len());
+        if self.walk.is_none() {
+            self.tour_play = None;
+        }
+        // the spotlight: a walk, focus mode or a downstream wave lights up some nodes and edges; the rest as chosen
+        let spot = if let Some(w) = &self.walk {
+            Some((0u8, w.version, self.walk_rest))
+        } else if self.focus_mode.is_some() || self.explore.down.is_some() {
+            Some((1u8, self.spot_version, self.spot_rest))
+        } else {
+            None
+        };
+        if let Some((tag, version, rest)) = spot {
+            let key = (tag, version, rest as u8);
+            if Some(key) != self.spot_key || self.focus.len() != n {
+                let (nodes, edges) = self.spot_marks();
                 self.focus = nodes.clone();
                 self.hood = nodes;
                 self.hi_edges = edges;
-                self.hi_active = self.walk_rest != crate::walk::Rest::AsIs;
-                self.walk_hi_key = Some(key);
+                self.hi_active = rest != crate::walk::Rest::AsIs;
+                self.spot_key = Some(key);
                 self.hi_key = (None, u64::MAX, false);
             }
+            self.hi_rest = Some(rest);
             return;
         }
-        self.walk_hi_key = None;
+        self.spot_key = None;
+        self.hi_rest = None;
         let hover_key = if self.s.sel_count == 0 { self.hover } else { None };
         let key = (hover_key, self.s.sel_version, self.s.look.highlight_hood);
         if key == self.hi_key && self.focus.len() == n {
@@ -265,13 +277,13 @@ impl App {
         }
 
         self.update_highlight();
-        let walk_edges = self.walk.is_some() && self.walk_rest != crate::walk::Rest::AsIs;
+        let spot = self.hi_rest.is_some_and(|r| r != crate::walk::Rest::AsIs);
         let hi = Highlight {
             focus: &self.focus,
             hood: &self.hood,
             active: self.hi_active,
-            edges: if walk_edges { Some(&self.hi_edges) } else { None },
-            hide: walk_edges && self.walk_rest == crate::walk::Rest::Hide,
+            edges: if spot { Some(&self.hi_edges) } else { None },
+            hide: self.hi_rest == Some(crate::walk::Rest::Hide),
         };
         // a huge graph is drawn thinner while it is dragged or zoomed, and in full as soon as the pointer rests
         let moving = resp.dragged() || (resp.hovered() && ui.input(|i| i.smooth_scroll_delta != Vec2::ZERO));
@@ -286,6 +298,7 @@ impl App {
         let t_p = std::time::Instant::now();
         self.paint_graph(&painter, rect);
         self.paint_walk(&painter, rect);
+        self.paint_spot(&painter, rect);
         self.paint_labels(&painter, rect);
         self.paint_section(&painter, rect);
         self.paint_overlays(&painter, rect);
@@ -301,7 +314,9 @@ impl App {
         }
 
         self.maximize_button(ui, rect);
+        self.time_bar(ui, rect);
         self.walk_panel(ui, rect);
+        self.spot_panel(ui, rect);
 
         // tooltip
         if let (Some(e), None, None, true) = (self.hover_edge, self.hover, self.box_start, self.settings.show_tooltips && self.section_drag.is_none()) {
@@ -425,7 +440,15 @@ impl App {
         let mods = ui.input(|i| i.modifiers);
 
         // zoom around the cursor
-        if resp.hovered() {
+        if resp.hovered() && self.focus_mode.is_some() && mods.alt {
+            let scroll = ui.input(|i| { let d = i.smooth_scroll_delta(); d.y + d.x });
+            self.focus_scroll += scroll;
+            if self.focus_scroll.abs() >= 40.0 {
+                let up = self.focus_scroll > 0.0;
+                self.focus_scroll = 0.0;
+                self.focus_steps(if up { 1 } else { -1 });
+            }
+        } else if resp.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta().y);
             let pinch = ui.input(|i| i.zoom_delta());
             let factor = pinch * (scroll * 0.0016).exp();
@@ -667,9 +690,14 @@ impl App {
         }
         if resp.double_clicked() {
             match self.hover {
+                // focus mode: this node and what is near it stand out
                 Some(h) => {
+                    self.walk = None;
+                    self.explore.down = None;
                     self.s.select_only(h);
-                    self.s.select_neighbors();
+                    let steps = self.focus_mode.as_ref().map_or(1, |f| f.steps);
+                    self.focus_mode = Some(crate::explore::FocusMode { center: vec![h as u32], steps });
+                    self.spot_version += 1;
                 }
                 None => self.auto_fit = true,
             }
@@ -705,10 +733,22 @@ impl App {
             if left || right || up || down {
                 self.walk_key(ui.ctx(), left, right, up, down);
             }
+            if self.focus_mode.is_some() {
+                let (more, less) = ui.input(|i| (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals), i.key_pressed(egui::Key::Minus)));
+                if more || less {
+                    self.focus_steps(if more { 1 } else { -1 });
+                }
+            }
             if esc {
-                // the first Esc stops a walk (keeping the node selected), the next clears the selection
+                // Esc stops a walk or tour, then focus mode, then a downstream wave (keeping the selection);
+                // after that it clears the selection
                 if self.walk.is_some() {
                     self.walk = None;
+                    self.tour_play = None;
+                } else if self.focus_mode.is_some() {
+                    self.focus_mode = None;
+                } else if self.explore.down.is_some() {
+                    self.explore.down = None;
                 } else {
                     self.s.clear_selection();
                 }
@@ -875,6 +915,11 @@ impl App {
                     painter.add(Shape::mesh(m));
                 }
             }
+        }
+
+        // flow: dots travelling along the edges, source to target
+        if look.flow {
+            self.paint_flow(painter, off, width);
         }
 
         // the edge under the pointer: a lighter line over it
@@ -1298,6 +1343,16 @@ impl App {
     /// An arrow key: start a walk at the selected node, or step, go back, or choose the next step.
     pub fn walk_key(&mut self, ctx: &egui::Context, left: bool, right: bool, _up: bool, down: bool) {
         use crate::walk::Walk;
+        if let Some(tp) = &self.tour_play {
+            let pos = tp.pos;
+            let len = tp.nodes.len();
+            if right && pos + 1 < len {
+                self.tour_go(pos + 1);
+            } else if left && pos > 0 {
+                self.tour_go(pos - 1);
+            }
+            return;
+        }
         let sel = self.s.selected_list();
         let on_track = self.walk.as_ref().is_some_and(|w| sel.len() == 1 && sel[0] == w.current());
         if !on_track {
@@ -1407,6 +1462,10 @@ impl App {
     fn walk_panel(&mut self, ui: &mut Ui, rect: Rect) {
         use crate::theme::UiExt;
         use crate::walk::{Follow, Rest};
+        if self.tour_play.is_some() {
+            self.tour_panel(ui, rect);
+            return;
+        }
         let Some(w) = &self.walk else { return };
         let here = self.s.label_of(w.current() as usize);
         let next = w.picked().map(|(_, v)| self.s.label_of(v as usize));
@@ -1414,6 +1473,7 @@ impl App {
         let mut follow = self.walk_follow;
         let mut rest = self.walk_rest;
         let mut stop = false;
+        let mut save_tour = false;
         // bottom left, where it covers the least of the graph
         egui::Area::new(egui::Id::unique("walk_panel")).pivot(Align2::LEFT_BOTTOM).fixed_pos(rect.left_bottom() + Vec2::new(10.0, -64.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -1440,15 +1500,21 @@ impl App {
                 });
                 ui.add_space(2.0);
                 ui.weak("→ step   ← back   ↑ ↓ choose the next step   Esc stop");
+                if ui.add_enabled(step >= 2, egui::Button::new("Save this walk as a tour…")).on_hover_text("Keep the path, with a note at each stop, to play back later (Views ▸ Tours)").clicked() {
+                    save_tour = true;
+                }
             });
         });
+        if save_tour {
+            self.name_dialog = Some(crate::presets::NameDialog { what: crate::presets::Naming::Tour, name: String::new() });
+        }
         if stop {
             self.walk = None;
             return;
         }
         if rest != self.walk_rest {
             self.walk_rest = rest;
-            self.walk_hi_key = None;
+            self.spot_key = None;
         }
         if follow != self.walk_follow {
             self.walk_follow = follow;
@@ -1457,6 +1523,317 @@ impl App {
                 w.refresh(&self.s.g, follow, &shown);
             }
         }
+    }
+}
+
+// ───────────────────────── focus mode, downstream waves, tours ─────────────────────────
+
+impl App {
+    /// The nodes and edges the spotlight lights up.
+    fn spot_marks(&self) -> (Vec<bool>, Vec<bool>) {
+        use crate::explore::{reach, FAR};
+        use crate::walk::Follow;
+        let g = &self.s.g;
+        let (n, ne) = (g.n(), g.edges.len());
+        if let Some(w) = &self.walk {
+            return w.marks(n, ne);
+        }
+        let levels = match (&self.focus_mode, &self.explore.down) {
+            (Some(f), _) => reach(g, &f.center, Follow::Both, f.steps),
+            (None, Some(d)) => d.levels.iter().map(|&l| if l <= d.upto { l } else { FAR }).collect(),
+            _ => return (vec![false; n], vec![false; ne]),
+        };
+        let nodes: Vec<bool> = levels.iter().map(|&l| l != FAR).collect();
+        let edges = g.edges.iter().map(|&(a, b)| nodes[a as usize] && nodes[b as usize]).collect();
+        (nodes, edges)
+    }
+
+    /// One step more or less around the focused node.
+    fn focus_steps(&mut self, delta: i32) {
+        if let Some(f) = &mut self.focus_mode {
+            f.steps = (f.steps as i32 + delta).clamp(0, 50) as u32;
+            self.spot_version += 1;
+        }
+    }
+
+    /// Rings over the graph: the focused node, the start of a wave and its front.
+    fn paint_spot(&self, painter: &Painter, rect: Rect) {
+        if self.walk.is_some() {
+            return;
+        }
+        let off = rect.min.to_vec2();
+        let proj = self.s.projector(&self.cam, self.canvas_size);
+        let at = |i: u32| proj.at(&self.s, i as usize).map(|(p, f, _)| (Pos2::new(p.x, p.y) + off, node_radius_px(self.s.style.node_r[i as usize], f)));
+        let accent = Color32::from_rgb(10, 132, 255);
+        let glow = Color32::from_rgba_unmultiplied(10, 132, 255, 70);
+        if let Some(f) = &self.focus_mode {
+            for &c in &f.center {
+                if let Some((p, r)) = at(c) {
+                    painter.circle_stroke(p, r + 6.0, Stroke::new(3.0, accent));
+                    painter.circle_stroke(p, r + 10.0, Stroke::new(1.0, glow));
+                }
+            }
+        } else if let Some(d) = &self.explore.down {
+            for &c in &d.sources {
+                if let Some((p, r)) = at(c) {
+                    painter.circle_stroke(p, r + 6.0, Stroke::new(3.0, accent));
+                }
+            }
+            // the front of the wave: the nodes reached at the latest step
+            if d.upto > 0 {
+                let mut drawn = 0;
+                for (i, &l) in d.levels.iter().enumerate() {
+                    if l == d.upto && drawn < 4000 {
+                        if let Some((p, r)) = at(i as u32) {
+                            painter.circle_stroke(p, r + 3.5, Stroke::new(2.0, accent));
+                            drawn += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The small panel at the bottom left in focus mode or during a downstream wave.
+    fn spot_panel(&mut self, ui: &mut Ui, rect: Rect) {
+        use crate::theme::UiExt;
+        use crate::walk::Rest;
+        if self.walk.is_some() || (self.focus_mode.is_none() && self.explore.down.is_none()) {
+            return;
+        }
+        let now = ui.input(|i| i.time);
+        // a playing wave moves on by itself
+        if let Some(d) = &mut self.explore.down {
+            if d.playing {
+                if now >= d.next_at {
+                    if d.upto < d.max {
+                        d.upto += 1;
+                        self.spot_version += 1;
+                    }
+                    if d.upto >= d.max {
+                        d.playing = false;
+                    }
+                    d.next_at = now + 0.6;
+                }
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+            }
+        }
+        let mut rest = self.spot_rest;
+        let mut stop = false;
+        let mut steps_delta = 0;
+        let mut toggle_play = false;
+        let mut set_upto: Option<u32> = None;
+        let title = match (&self.focus_mode, &self.explore.down) {
+            (Some(f), _) => format!("Focus on {}", f.center.first().map(|&c| self.s.label_of(c as usize)).unwrap_or_default()),
+            (None, Some(d)) => {
+                let what = match d.follow {
+                    crate::walk::Follow::Out => "Downstream of",
+                    crate::walk::Follow::In => "Upstream of",
+                    crate::walk::Follow::Both => "Around",
+                };
+                let first = d.sources.first().map(|&c| self.s.label_of(c as usize)).unwrap_or_default();
+                if d.sources.len() > 1 { format!("{what} {first} and {} more", d.sources.len() - 1) } else { format!("{what} {first}") }
+            }
+            _ => String::new(),
+        };
+        egui::Area::new(egui::Id::unique("spot_panel")).pivot(Align2::LEFT_BOTTOM).fixed_pos(rect.left_bottom() + Vec2::new(10.0, -64.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(330.0);
+                ui.horizontal(|ui| {
+                    ui.label(crate::theme::semibold(&title));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button(if self.focus_mode.is_some() { "Exit" } else { "Stop" }).on_hover_text("Esc").clicked() {
+                            stop = true;
+                        }
+                    });
+                });
+                if let Some(f) = &self.focus_mode {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("−").clicked() {
+                            steps_delta = -1;
+                        }
+                        ui.label(match f.steps {
+                            0 => "just the node".to_string(),
+                            1 => "1 step around it".to_string(),
+                            k => format!("{k} steps around it"),
+                        });
+                        if ui.small_button("+").clicked() {
+                            steps_delta = 1;
+                        }
+                    });
+                } else if let Some(d) = &self.explore.down {
+                    ui.horizontal(|ui| {
+                        if ui.small_button(if d.playing { "❚❚" } else { "▶" }).clicked() {
+                            toggle_play = true;
+                        }
+                        let mut upto = d.upto;
+                        if ui.add(egui::Slider::new(&mut upto, 0..=d.max.max(1)).show_value(false)).changed() {
+                            set_upto = Some(upto.min(d.max));
+                        }
+                        let reached: usize = d.counts.iter().take(d.upto as usize + 1).skip(1).sum();
+                        ui.label(format!("step {} of {} · {reached} reached", d.upto, d.max));
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.weak("Rest of the graph");
+                    ui.segmented(&mut rest, &[(Rest::AsIs, "As is"), (Rest::Dim, "Dimmed"), (Rest::Hide, "Hidden")]);
+                });
+                ui.weak(if self.focus_mode.is_some() { "+ / −  or Alt + scroll: more or fewer steps   Esc exit" } else { "Esc stop" });
+            });
+        });
+        if stop {
+            self.focus_mode = None;
+            self.explore.down = None;
+            return;
+        }
+        if steps_delta != 0 {
+            self.focus_steps(steps_delta);
+        }
+        if let Some(d) = &mut self.explore.down {
+            if toggle_play {
+                d.playing = !d.playing;
+                if d.playing && d.upto >= d.max {
+                    d.upto = 0;
+                }
+                d.next_at = now + 0.6;
+                self.spot_version += 1;
+            }
+            if let Some(u) = set_upto {
+                d.upto = u;
+                d.playing = false;
+                self.spot_version += 1;
+            }
+        }
+        if rest != self.spot_rest {
+            self.spot_rest = rest;
+            self.spot_key = None;
+        }
+    }
+
+    /// Play a tour from its first stop.
+    pub fn play_tour(&mut self, ctx: &egui::Context, k: usize) {
+        let Some(t) = self.tours.get(k) else { return };
+        let mut nodes = Vec::new();
+        let mut stop = Vec::new();
+        for (i, s) in t.stops.iter().enumerate() {
+            if let Some(&v) = self.s.g.index.get(&s.id) {
+                nodes.push(v);
+                stop.push(i);
+            }
+        }
+        if nodes.is_empty() {
+            self.toast(ctx, "None of this tour's stops is in the graph that is loaded");
+            return;
+        }
+        self.focus_mode = None;
+        self.explore.down = None;
+        self.tour_play = Some(crate::walk::TourPlay { tour: k, pos: 0, nodes, stop });
+        self.tour_go(0);
+    }
+
+    /// Go to a stop of the tour being played: the path so far is drawn, the next stop shown as the next step.
+    pub fn tour_go(&mut self, pos: usize) {
+        let Some(tp) = &mut self.tour_play else { return };
+        tp.pos = pos.min(tp.nodes.len() - 1);
+        let nodes = tp.nodes.clone();
+        let pos = tp.pos;
+        let g = &self.s.g;
+        let mut path: Vec<(u32, Option<u32>)> = vec![(nodes[0], None)];
+        for i in 1..=pos {
+            path.push((nodes[i], crate::explore::edge_between(g, nodes[i - 1], nodes[i])));
+        }
+        let next = match nodes.get(pos + 1) {
+            Some(&v) => vec![(crate::explore::edge_between(g, nodes[pos], v).unwrap_or(u32::MAX), v)],
+            None => vec![],
+        };
+        self.spot_version += 1;
+        self.walk = Some(crate::walk::Walk { path, next, pick: 0, version: self.spot_version });
+        self.s.select_only(nodes[pos] as usize);
+        self.keep_in_view(nodes[pos] as usize);
+    }
+}
+
+impl App {
+    /// The panel while a tour plays: the stop, its note (which can be written here) and the way along.
+    fn tour_panel(&mut self, ui: &mut Ui, rect: Rect) {
+        let Some(tp) = &self.tour_play else { return };
+        let (t, pos, len) = (tp.tour, tp.pos, tp.nodes.len());
+        let si = tp.stop[pos];
+        let here = self.s.label_of(tp.nodes[pos] as usize);
+        let name = self.tours.get(t).map(|x| x.name.clone()).unwrap_or_default();
+        let mut go: Option<usize> = None;
+        let mut stop = false;
+        egui::Area::new(egui::Id::unique("tour_panel")).pivot(Align2::LEFT_BOTTOM).fixed_pos(rect.left_bottom() + Vec2::new(10.0, -64.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(330.0);
+                ui.horizontal(|ui| {
+                    ui.label(crate::theme::semibold(format!("Tour: {name}")));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("End").on_hover_text("Esc").clicked() {
+                            stop = true;
+                        }
+                    });
+                });
+                ui.label(format!("Stop {} of {len}: {here}", pos + 1));
+                if let Some(s) = self.tours.get_mut(t).and_then(|x| x.stops.get_mut(si)) {
+                    ui.add(egui::TextEdit::multiline(&mut s.note).id_salt("tour_note").hint_text("A note for this stop").desired_rows(2).desired_width(310.0));
+                }
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(pos > 0, egui::Button::new("◀ Back")).clicked() {
+                        go = Some(pos - 1);
+                    }
+                    if ui.add_enabled(pos + 1 < len, egui::Button::new("Next ▶")).clicked() {
+                        go = Some(pos + 1);
+                    }
+                    ui.weak("or ← / →");
+                });
+            });
+        });
+        if stop {
+            self.walk = None;
+            self.tour_play = None;
+        } else if let Some(p) = go {
+            self.tour_go(p);
+        }
+    }
+}
+
+impl App {
+    /// Flow animation: evenly spaced dots moving along every drawn edge from its source to its target, in the edge's
+    /// colour but stronger, at the flow speed (times the edge's own speed when it follows an attribute).
+    fn paint_flow(&self, painter: &Painter, off: Vec2, width: f32) {
+        let look = &self.s.look;
+        let n_edges = self.draw.edges.len() + self.draw.edges_hi.len();
+        if n_edges == 0 || n_edges > 40_000 {
+            return;
+        }
+        let t = painter.ctx().input(|i| i.time) as f32;
+        let gap = 34.0f32;
+        let r = (width * 1.3).max(1.8);
+        let mut sink = MeshSink::new(self.tex.small.id());
+        for e in self.draw.edges.iter().chain(self.draw.edges_hi.iter()) {
+            let (a, b) = (Pos2::new(e.a[0], e.a[1]) + off, Pos2::new(e.b[0], e.b[1]) + off);
+            let d = b - a;
+            let len = d.length();
+            if len < 4.0 {
+                continue;
+            }
+            let mul = self.s.style.edge_speed.as_ref().and_then(|v| v.get(e.idx as usize)).copied().unwrap_or(1.0);
+            let shift = (t * look.flow_speed * mul).rem_euclid(gap);
+            let dir = d / len;
+            let c = Color32::from_rgba_unmultiplied(e.rgba[0].saturating_add(40), e.rgba[1].saturating_add(40), e.rgba[2].saturating_add(40), (e.rgba[3] as f32 * 2.6).min(255.0) as u8);
+            let mut s = shift;
+            let mut guard = 0;
+            while s < len && guard < 200 {
+                sink.quad_uv(a + dir * s, r * 1.15, c);
+                s += gap;
+                guard += 1;
+            }
+        }
+        for m in sink.finish() {
+            painter.add(Shape::mesh(m));
+        }
+        painter.ctx().request_repaint();
     }
 }
 

@@ -58,7 +58,23 @@ pub struct App {
     pub walk_follow: crate::walk::Follow,
     pub walk_rest: crate::walk::Rest,
     pub hi_edges: Vec<bool>,
-    pub walk_hi_key: Option<(u64, u8)>,
+    /// The spotlight (a walk, focus mode or a downstream wave): what it was last worked out for, how the rest looks
+    /// while one is on, and a counter that changes whenever focus mode or the wave does.
+    pub spot_key: Option<(u8, u64, u8)>,
+    pub hi_rest: Option<crate::walk::Rest>,
+    pub spot_version: u64,
+    /// How the rest looks in focus mode and during a downstream wave.
+    pub spot_rest: crate::walk::Rest,
+    pub focus_mode: Option<crate::explore::FocusMode>,
+    /// Downstream waves, routes and bottlenecks (Query tab).
+    pub explore: crate::explore::ExploreState,
+    /// Saved walks with notes, and the one being played.
+    pub tours: Vec<crate::walk::Tour>,
+    pub tour_play: Option<crate::walk::TourPlay>,
+    /// Alt + scroll in focus mode: how much has been scrolled towards the next step.
+    pub focus_scroll: f32,
+    /// The time bar is playing.
+    pub time_playing: bool,
     /// A text box had the keys in the last frame.
     pub was_typing: bool,
     /// The edge under the pointer when no node is, and where the pointer and camera were when it was looked up.
@@ -195,7 +211,16 @@ impl App {
             walk_rest: Default::default(),
             hi_edges: vec![],
             was_typing: false,
-            walk_hi_key: None,
+            spot_key: None,
+            hi_rest: None,
+            spot_version: 0,
+            spot_rest: crate::walk::Rest::Dim,
+            focus_mode: None,
+            explore: Default::default(),
+            tours: vec![],
+            tour_play: None,
+            focus_scroll: 0.0,
+            time_playing: false,
             hover: None,
             drag_node: None,
             box_start: None,
@@ -262,6 +287,11 @@ impl App {
 
     pub fn after_graph_change(&mut self) {
         self.walk = None;
+        self.tour_play = None;
+        self.focus_mode = None;
+        self.explore.down = None;
+        self.explore.cuts = None;
+        self.explore.routes.clear();
         self.table.dirty = true;
         self.etable.dirty = true;
         self.hi_key = (None, u64::MAX, false);
@@ -2358,7 +2388,7 @@ f 2 4 8 6
         // the rest of the graph: hidden leaves only the path and the next steps
         h.press_plain(Key::ArrowRight);
         h.app.walk_rest = Rest::Hide;
-        h.app.walk_hi_key = None;
+        h.app.spot_key = None;
         h.frames(2);
         let marked = h.app.walk.as_ref().unwrap().marks(h.app.s.g.n(), h.app.s.g.edges.len()).0.iter().filter(|x| **x).count();
         assert!(h.app.draw.nodes.len() <= marked && h.app.draw.nodes.len() >= 2, "{} drawn, {marked} marked", h.app.draw.nodes.len());
@@ -2382,6 +2412,124 @@ f 2 4 8 6
         let shown: Vec<&str> = (0..h.app.s.g.n()).filter(|&i| h.app.s.vis[i]).map(|i| h.app.s.g.ids[i].as_str()).collect();
         assert!(shown.contains(&"n5") && shown.contains(&"n12") && shown.contains(&"n120"), "{shown:?}");
         assert!(!shown.contains(&"n50"));
+    }
+
+    #[test]
+    fn focus_downstream_routes_bottlenecks_tours_flow_and_time() {
+        use crate::walk::{Follow, Rest};
+        use egui::Key;
+        let dir = std::env::temp_dir().join(format!("graphsight-explore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // a chain a → b → c → d with a side branch b → e, and a separate f – g; dates a month apart
+        std::fs::write(dir.join("e.csv"), "source,target,directed,flow\na,b,yes,1\nb,c,yes,5\nc,d,yes,9\nb,e,yes,2\nf,g,no,3\n").unwrap();
+        std::fs::write(dir.join("n.csv"), "id,built\na,2024-01-05\nb,2024-02-05\nc,2024-03-05\nd,2024-04-05\ne,2024-05-05\nf,2024-06-05\ng,\n").unwrap();
+        let mut h = Harness::new();
+        h.app.load_path(dir.join("e.csv"), Some(PendKindHint::Edges));
+        h.app.load_path(dir.join("n.csv"), Some(PendKindHint::Nodes));
+        h.frames(4);
+        let id = |h: &Harness, s: &str| h.app.s.g.index[s] as usize;
+
+        // focus mode: the node and its neighbours stand out, the rest is dimmed; + widens it; Esc leaves
+        let b = id(&h, "b");
+        h.app.focus_mode = Some(crate::explore::FocusMode { center: vec![b as u32], steps: 1 });
+        h.app.s.select_only(b);
+        h.app.spot_version += 1;
+        h.app.spot_rest = Rest::Hide;
+        h.frames(2);
+        let drawn: Vec<String> = h.app.draw.nodes.iter().map(|n| h.app.s.g.ids[n.idx as usize].clone()).collect();
+        assert!(drawn.contains(&"a".to_string()) && drawn.contains(&"c".to_string()) && !drawn.contains(&"d".to_string()), "{drawn:?}");
+        h.press_plain(Key::Equals);
+        assert_eq!(h.app.focus_mode.as_ref().unwrap().steps, 2);
+        h.frames(1);
+        assert!(h.app.draw.nodes.iter().any(|n| h.app.s.g.ids[n.idx as usize] == "d"));
+        h.press_plain(Key::Escape);
+        assert!(h.app.focus_mode.is_none() && h.app.s.sel[b], "Esc leaves focus mode, the node stays selected");
+
+        // what's downstream of b, played step by step
+        h.app.start_down(vec![b as u32], Follow::Out, 0.0);
+        let d = h.app.explore.down.as_ref().unwrap();
+        assert_eq!((d.max, d.counts.clone()), (2, vec![1, 2, 1]), "b; then c and e; then d");
+        h.app.explore.down.as_mut().unwrap().upto = 1;
+        h.app.explore.down.as_mut().unwrap().playing = false;
+        h.app.spot_version += 1;
+        h.frames(2);
+        let lit: Vec<String> = (0..h.app.s.g.n()).filter(|&i| h.app.focus[i]).map(|i| h.app.s.g.ids[i].clone()).collect();
+        assert_eq!(lit.len(), 3, "{lit:?}");
+        // the Query tab draws with all its sections
+        let mut dock = h.app.dock.take().unwrap();
+        crate::dock::open_or_focus(&mut dock, crate::dock::Tab::Query);
+        h.app.dock = Some(dock);
+        h.frames(2);
+        h.app.explore.down = None;
+
+        // a route from a to d, shown as a walk; bottlenecks of the chain
+        h.app.explore.path_from = "a".into();
+        h.app.explore.path_to = "d".into();
+        let (from, to) = (h.app.find_node("a").unwrap(), h.app.find_node("D").unwrap());
+        h.app.explore.routes = crate::explore::routes(&h.app.s.g, from, to, Follow::Out, h.app.s.g.edge_col("flow"), 3);
+        assert_eq!(h.app.explore.routes[0].nodes.len(), 4);
+        h.app.show_route(0);
+        h.frames(2);
+        assert_eq!(h.app.walk.as_ref().unwrap().path.len(), 4);
+        assert!(h.app.s.sel[id(&h, "d")]);
+        let cuts = crate::explore::bottlenecks(&h.app.s.g);
+        assert!(cuts.nodes.iter().any(|&(v, _)| v as usize == b), "b holds the chain together");
+
+        // the walk saved as a tour, played with the arrow keys, its notes kept in the session
+        h.app.name_dialog = Some(crate::presets::NameDialog { what: crate::presets::Naming::Tour, name: "Main line".into() });
+        h.frames(1);
+        let ctx = h.ctx.clone();
+        // save through the same path as the dialog's Save button
+        let stops: Vec<crate::walk::TourStop> = h.app.walk.as_ref().unwrap().path.iter().map(|&(v, _)| crate::walk::TourStop { id: h.app.s.g.ids[v as usize].clone(), note: String::new() }).collect();
+        h.app.tours.push(crate::walk::Tour { name: "Main line".into(), stops });
+        h.app.name_dialog = None;
+        h.app.play_tour(&ctx, 0);
+        assert_eq!(h.app.tour_play.as_ref().unwrap().pos, 0);
+        assert!(h.app.s.sel[id(&h, "a")]);
+        h.press_plain(Key::ArrowRight);
+        h.press_plain(Key::ArrowRight);
+        assert_eq!(h.app.tour_play.as_ref().unwrap().pos, 2);
+        assert!(h.app.s.sel[id(&h, "c")]);
+        h.app.tours[0].stops[2].note = "Valve check here".into();
+        h.press_plain(Key::ArrowLeft);
+        assert!(h.app.s.sel[id(&h, "b")]);
+        h.press_plain(Key::Escape);
+        assert!(h.app.tour_play.is_none() && h.app.walk.is_none());
+
+        // flow animation: drawn edges know which edge they are
+        h.app.s.look.flow = true;
+        h.app.s.look.flow_by = Some(crate::edgeattr::EdgeRef { end: crate::edgeattr::End::Edge, col: "flow".into() });
+        h.app.restyle();
+        h.frames(2);
+        assert!(h.app.s.style.edge_speed.as_ref().unwrap().iter().any(|&v| v > 2.0));
+        assert!(h.app.draw.edges.iter().all(|e| (e.idx as usize) < h.app.s.g.edges.len()));
+
+        // the time bar: up to the line, or only the month under it; undated g stays
+        h.app.s.time.col = Some("built".into());
+        h.app.s.time.show = true;
+        h.app.time_reset();
+        assert_eq!(h.app.s.n_vis, 7, "the line starts at the end: everything shown");
+        h.app.s.time.cursor = Some(crate::timebar::days_from_civil(2024, 3, 20) as f64);
+        h.app.refilter();
+        let shown: Vec<String> = (0..h.app.s.g.n()).filter(|&i| h.app.s.vis[i]).map(|i| h.app.s.g.ids[i].clone()).collect();
+        assert_eq!(shown, ["a", "b", "c", "g"]);
+        h.app.s.time.only_period = true;
+        h.app.s.time.view = Some([crate::timebar::days_from_civil(2023, 12, 1) as f64, crate::timebar::days_from_civil(2024, 7, 1) as f64]);
+        h.app.refilter();
+        let shown: Vec<String> = (0..h.app.s.g.n()).filter(|&i| h.app.s.vis[i]).map(|i| h.app.s.g.ids[i].clone()).collect();
+        assert_eq!(shown, ["c", "g"], "only March (and the undated node)");
+        h.frames(2);
+
+        // tours and the time bar are kept in the session
+        let file = dir.join("explore.graphsight");
+        h.app.save_project_to(&file).unwrap();
+        let mut h2 = Harness::new();
+        h2.app.open_project(&file);
+        assert!(h2.app.error.is_none(), "{:?}", h2.app.error);
+        assert_eq!(h2.app.tours[0].stops[2].note, "Valve check here");
+        assert_eq!(h2.app.s.time.col.as_deref(), Some("built"));
+        assert_eq!(h2.app.s.n_vis, 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

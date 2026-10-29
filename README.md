@@ -142,6 +142,36 @@ and thin lines show the next steps (the chosen one dashed), so the graph's own c
 the graph can stay *As is*, be *Dimmed* or *Hidden*. A small panel at the bottom left shows where you are and what is
 next, and the view follows when the walk reaches the edge of the screen.
 
+**Focus mode** — double-click a node: it and everything within a number of steps of it stand out, the rest is
+dimmed (or hidden, or left as it is). **+ / −** or **Alt + scroll** take in more or fewer steps; **Esc** leaves.
+
+**What's downstream** — *Query ▸ What's downstream*: from the selected nodes, everything they lead to (or what leads to
+them, *Upstream*, or both), played wave by wave with ▶ and a step slider; the start and the front of the wave are
+ringed, and the counts per step are listed. *Select all reached* selects it all.
+
+**Path between two nodes** — *Query ▸ Path between two nodes*: give the two ends (an id or name, the selected node,
+or the two selected nodes), along the arrows or any way, by fewest steps or the cheapest by any numeric edge
+attribute. Up to five routes are found, best first, with genuine alternatives; the chosen one is drawn as a walk,
+and **←** steps back along it.
+
+**Bottlenecks** — *Query ▸ Bottlenecks* finds the nodes and connections whose loss splits the network into pieces
+(every connection taken as two-way), each with how many nodes it would cut off, largest first. Select them all, or
+click one to go to it.
+
+**Tours** — while walking, *Save this walk as a tour…* keeps the path. *Views ▸ Tours ▸ Play* goes along it with the
+arrow keys (or Back / Next), with a note at each stop that can be written right there. Tours are saved in the session.
+
+**Flow animation** — *Appearance ▸ Edges ▸ Animate the flow*: dots travel along the edges from source to target, at
+the flow speed, faster or slower by any attribute (*Speed by*).
+
+**Time bar** — *Filter ▸ Time*: choose an attribute holding dates (2024-03-12, 12/03/2024, 12 Mar 2024, Mar 2024,
+a year, an Excel date number; with a time of day too) and a rounded bar appears along the top of the graph. It shows
+days, months or years depending on how far it is zoomed (the scroll wheel over the bar zooms, Shift + scroll pans, the
+*Days · Months · Years* chips jump to a scale, double-click shows all of it), with a small chart of how many nodes fall
+in each period. Drag the vertical line: nodes dated after it are taken out like filtered-out nodes (dimmed or hidden),
+or, with *Only the day / month / year under the line*, everything outside that period. ▶ plays time forward. The bar
+and its place are kept in the session.
+
 **Edges table and edge details** — the *Edges* tab (next to *Nodes*, or *Window ▸ Edges*) lists the edges on show
 with their source, target and every edge attribute. Click a header to sort, a row to select that edge (Ctrl/Shift+click
 adds), double-click to zoom to it. Resting the pointer on an edge in the graph shows its details in a tooltip, and a
@@ -234,6 +264,8 @@ graphsight --help
 | `edgeattr.rs` | edge attributes made from the nodes at both ends (pair, same / different, difference …) |
 | `geometry.rs` | OBJ solids: reading, matching objects to nodes by name, placing and shading them in 3D |
 | `shapes.rs` | the ten node shapes: flat outlines, the solids for 3D, shading and drawing |
+| `explore.rs` | focus mode and downstream reach, bottlenecks, routes between two nodes; their panels |
+| `timebar.rs` | the time bar: reading dates, days / months / years, filtering by time |
 | `walk.rs` | walking the graph with the arrow keys: the path, the next steps, going back |
 | `presets.rs` | named presets of the appearance, edge attributes, filters and layout settings (`presets.json`) |
 | `expr.rs` | filter expression parser/evaluator |

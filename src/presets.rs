@@ -90,6 +90,7 @@ pub fn save(list: &[Preset]) {
 pub enum Naming {
     Preset,
     View,
+    Tour,
 }
 
 /// The small window that asks for a name (typing in a menu closes it at the first click).
@@ -275,6 +276,32 @@ impl App {
                     }
                 });
             }
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Tours").family(theme::semibold_family()).size(11.5).weak());
+            if self.tours.is_empty() {
+                ui.label(theme::secondary("None yet: walk the graph with the arrow keys, then Save this walk as a tour."));
+            }
+            let mut play = None;
+            let mut drop = None;
+            for (i, t) in self.tours.iter().enumerate() {
+                ui.menu_button(format!("{}  ({} stops)", t.name, t.stops.len()), |ui| {
+                    if ui.button("Play").on_hover_text("Go along it with the arrow keys; write a note at each stop").clicked() {
+                        play = Some(i);
+                        ui.close();
+                    }
+                    if ui.button("Delete").clicked() {
+                        drop = Some(i);
+                        ui.close();
+                    }
+                });
+            }
+            if let Some(i) = play {
+                self.play_tour(ui.ctx(), i);
+            }
+            if let Some(i) = drop {
+                self.tours.remove(i);
+                self.tour_play = None;
+            }
             ui.add_space(2.0);
             if ui.add_enabled(self.s.g.n() > 0, egui::Button::new("Save the current view…")).clicked() {
                 self.name_dialog = Some(NameDialog { what: Naming::View, name: String::new() });
@@ -311,10 +338,12 @@ impl App {
         let existing = match what {
             Naming::Preset => self.presets.iter().any(|p| p.name.eq_ignore_ascii_case(dlg.name.trim())),
             Naming::View => self.views.iter().any(|v| v.name.eq_ignore_ascii_case(dlg.name.trim())),
+            Naming::Tour => self.tours.iter().any(|v| v.name.eq_ignore_ascii_case(dlg.name.trim())),
         };
         let (title, ask, hint) = match what {
             Naming::Preset => ("Save preset", "Name for these settings:", "e.g. Systems by colour"),
             Naming::View => ("Save view", "Name for this view:", "e.g. Plant room, level 2"),
+            Naming::Tour => ("Save tour", "Name for this tour:", "e.g. Supply route to level 3"),
         };
         let mut save_now = false;
         let mut cancel = false;
@@ -352,6 +381,15 @@ impl App {
                     }
                     self.persist_presets();
                     self.toast(ctx, format!("Preset “{name}” saved"));
+                }
+                Naming::Tour => {
+                    let stops = self.walk.as_ref().map(|w| w.path.iter().map(|&(v, _)| crate::walk::TourStop { id: self.s.g.ids[v as usize].clone(), note: String::new() }).collect()).unwrap_or_default();
+                    let t = crate::walk::Tour { name: name.clone(), stops };
+                    match self.tours.iter_mut().find(|q| q.name.eq_ignore_ascii_case(&name)) {
+                        Some(q) => *q = t,
+                        None => self.tours.push(t),
+                    }
+                    self.toast(ctx, format!("Tour “{name}” saved: play it from Views ▸ Tours; it is kept when you save the session"));
                 }
                 Naming::View => {
                     let v = self.current_view(&name);

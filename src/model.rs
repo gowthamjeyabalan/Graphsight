@@ -77,6 +77,11 @@ pub struct Look {
     pub edge_wmax: f32,
     /// Line pattern (solid, dashed, dotted …) per category of an attribute.
     pub edge_dash_by: Option<EdgeRef>,
+    /// Flow animation: dots travel along the edges in their direction, at this many pixels a second, faster or
+    /// slower by an attribute.
+    pub flow: bool,
+    pub flow_speed: f32,
+    pub flow_by: Option<EdgeRef>,
     pub edge_alpha: f32,
     pub edge_width: f32,
     pub arrows: bool,
@@ -118,6 +123,9 @@ impl Default for Look {
             edge_wmin: 0.5,
             edge_wmax: 4.0,
             edge_dash_by: None,
+            flow: false,
+            flow_speed: 60.0,
+            flow_by: None,
             edge_alpha: 0.35,
             edge_width: 1.0,
             arrows: true,
@@ -193,6 +201,8 @@ pub struct StyleCache {
     pub edge_dash: Option<Vec<u8>>,
     pub dash_legend: Vec<(String, u8, usize)>,
     pub dash_title: String,
+    /// Flow speed per edge (a multiple of the base speed), when it follows an attribute.
+    pub edge_speed: Option<Vec<f32>>,
     /// Shape per node (an index into `NodeShape::ALL`), when shapes follow a column; the legend and its title.
     pub node_shape: Option<Vec<u8>>,
     pub shape_legend: Vec<(String, u8, usize)>,
@@ -215,6 +225,7 @@ impl Default for StyleCache {
             edge_dash: None,
             dash_legend: vec![],
             dash_title: String::new(),
+            edge_speed: None,
             node_shape: None,
             shape_legend: vec![],
             shape_title: String::new(),
@@ -426,7 +437,25 @@ pub fn compute_style(g: &Graph, look: &Look) -> StyleCache {
         EdgeColorMode::SourceAttr | EdgeColorMode::TargetAttr => look.edge_node_by.clone(),
         _ => None,
     };
+    // flow speed: numbers from a quarter to three times the base speed, categories step through that range
+    let edge_speed = look.flow_by.as_ref().and_then(|r| r.values(g)).map(|col| {
+        if col.is_numeric() && !col.hint_cat {
+            let range = scale_range(&col, true);
+            (0..col.len())
+                .map(|i| match (col.num(i), range) {
+                    (Some(v), Some((lo, hi))) if hi > lo => 0.25 + 2.75 * ((v - lo) / (hi - lo)).clamp(0.0, 1.0) as f32,
+                    (Some(_), _) => 1.0,
+                    _ => 0.25,
+                })
+                .collect()
+        } else {
+            let (codes, labels) = col.as_categories();
+            let k = labels.len().max(2) - 1;
+            codes.iter().map(|&c| if c == NULL_CODE { 0.25 } else { 0.25 + 2.75 * c as f32 / k as f32 }).collect()
+        }
+    });
     StyleCache {
+        edge_speed,
         node_rgb,
         node_r,
         edge_rgb,
@@ -599,6 +628,10 @@ pub struct Session {
     pub fit_requested: bool,
     /// Edge attributes made from both ends (made again with every rebuild).
     pub edge_attrs: Vec<crate::edgeattr::EdgeAttr>,
+    /// The time bar's settings, and every node's date in its column (worked out once per column and graph).
+    pub time: crate::timebar::TimeSettings,
+    time_key: Option<(String, usize, usize)>,
+    time_vals: Vec<f64>,
     /// Solids from an OBJ file, the settings for them, which solid each node has, and how many matched.
     pub geo: Option<crate::geometry::SharedLib>,
     pub geo_set: crate::geometry::GeoSettings,
@@ -653,6 +686,9 @@ impl Default for Session {
             sel_edges: vec![],
             style: StyleCache::default(),
             fit_requested: false,
+            time: Default::default(),
+            time_key: None,
+            time_vals: vec![],
             geo: None,
             geo_set: Default::default(),
             geo_node: vec![],
@@ -731,6 +767,7 @@ impl Session {
         }
         let first_time = known * 2 < n;
         self.g = g;
+        self.time_key = None;
         crate::edgeattr::apply(&mut self.g, &self.edge_attrs);
         self.rematch_geometry();
         self.pos = pos;
@@ -824,6 +861,7 @@ impl Session {
     // ── visibility ──
 
     pub fn recompute_visibility(&mut self) {
+        let time_days = (self.time.show && self.time.cursor.is_some()).then(|| self.time_days()).filter(|d| !d.is_empty());
         let g = &self.g;
         let n = g.n();
         let mut vis: Vec<bool> = self.manual_hidden.iter().map(|h| !h).collect();
@@ -875,6 +913,15 @@ impl Session {
                     hit = g.node_cols.iter().any(|c| !c.is_metric && c.cat_str(i).is_some_and(|s| partial.iter().any(|t| contains_ci(s, t))));
                 }
                 vis[i] = hit;
+            }
+        }
+        // the time bar: what is dated after the line (or outside the period under it) is taken out
+        if let (Some(days), Some(cursor), Some([v0, v1])) = (&time_days, self.time.cursor, self.time.view) {
+            let unit = crate::timebar::Unit::for_span(v1 - v0);
+            for i in 0..n.min(days.len()) {
+                if vis[i] && !crate::timebar::passes(days[i], cursor, self.time.only_period, unit) {
+                    vis[i] = false;
+                }
             }
         }
         self.n_vis = vis.iter().filter(|v| **v).count();
@@ -1163,6 +1210,16 @@ impl Session {
         self.style = compute_style(&self.g, &self.look);
     }
 
+    /// Every node's date in the time bar's column (NaN where there is none).
+    pub fn time_days(&mut self) -> Vec<f64> {
+        let key = self.time.col.clone().map(|c| (c, self.g.n(), self.g.node_cols.len()));
+        if key != self.time_key {
+            self.time_vals = key.as_ref().and_then(|(c, _, _)| self.g.node_col(c)).map(crate::timebar::node_days).unwrap_or_default();
+            self.time_key = key;
+        }
+        self.time_vals.clone()
+    }
+
     /// Load solids from an OBJ file and match them to the nodes (by the chosen column, or the one that matches best).
     pub fn load_geometry(&mut self, path: &Path) -> Result<()> {
         let lib = crate::geometry::read_obj(path)?;
@@ -1205,7 +1262,7 @@ impl Session {
     /// Forget edge settings whose attribute is gone.
     pub fn drop_missing_edge_refs(&mut self) {
         let g = &self.g;
-        for r in [&mut self.look.edge_width_by, &mut self.look.edge_dash_by] {
+        for r in [&mut self.look.edge_width_by, &mut self.look.edge_dash_by, &mut self.look.flow_by] {
             if r.as_ref().is_some_and(|r| !r.exists(g)) {
                 *r = None;
             }
@@ -1732,6 +1789,8 @@ pub struct DrawEdge {
     pub w: f32,
     /// Line pattern: an index into `DASHES` (0 = solid).
     pub dash: u8,
+    /// The edge it draws (u32::MAX for the links standing in for contracted nodes).
+    pub idx: u32,
 }
 
 /// A bounding box projected to the screen (3D only). Parts behind the camera are already cut away.
@@ -1914,7 +1973,7 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
         }
         let w = s.style.edge_w.as_ref().map_or(1.0, |w| w[e]);
         let dash = s.style.edge_dash.as_ref().map_or(0, |d| d[e]);
-        let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi], directed: g.edge_directed(e), w, dash };
+        let de = DrawEdge { a: [pa.x, pa.y], b: [pb.x, pb.y], rgba: [c[0], c[1], c[2], (alpha * 255.0) as u8], target_r: radius[bi], directed: g.edge_directed(e), w, dash, idx: e as u32 };
         Some((de, kind))
     };
     const CHUNK: usize = 8192;
@@ -1982,14 +2041,14 @@ pub fn build_draw_list(s: &Session, cam: &ViewCam, size: V2, hi: &Highlight, out
             while t < len && guard < 4000 {
                 let e = (t + dash).min(len);
                 let (p0, p1) = (pa + dir * t, pa + dir * e);
-                out.edges.push(DrawEdge { a: [p0.x, p0.y], b: [p1.x, p1.y], rgba, target_r: 0.0, directed: false, w: 1.0, dash: 0 });
+                out.edges.push(DrawEdge { a: [p0.x, p0.y], b: [p1.x, p1.y], rgba, target_r: 0.0, directed: false, w: 1.0, dash: 0, idx: u32::MAX });
                 t += dash + gap;
                 guard += 1;
             }
             if directed {
                 // a short solid stretch at the target carries the arrow head
                 let tail = pa + dir * (len - dash.min(len));
-                out.edges.push(DrawEdge { a: [tail.x, tail.y], b: [pb.x, pb.y], rgba, target_r: radius[bi], directed: true, w: 1.0, dash: 0 });
+                out.edges.push(DrawEdge { a: [tail.x, tail.y], b: [pb.x, pb.y], rgba, target_r: radius[bi], directed: true, w: 1.0, dash: 0, idx: u32::MAX });
             }
           }
         }

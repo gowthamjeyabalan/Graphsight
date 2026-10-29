@@ -246,10 +246,16 @@ impl App {
             Tab::Data => self.section_data(ui),
             Tab::Layout => self.section_layout(ui, &cols),
             Tab::Appearance => self.section_appearance(ui, &cols),
-            Tab::Filter => self.section_filter(ui, &cols),
+            Tab::Filter => {
+                self.section_filter(ui, &cols);
+                self.time_section(ui, &cols);
+            }
             Tab::Analysis => self.section_analysis(ui),
             Tab::Subgraph => self.section_subgraph(ui, &cols),
-            Tab::Query => self.section_query(ui, &cols),
+            Tab::Query => {
+                self.section_query(ui, &cols);
+                self.explore_sections(ui);
+            }
             Tab::Section => self.section_panel(ui),
             Tab::Inspector => self.inspector(ui),
             Tab::Legend => self.legend(ui),
@@ -613,6 +619,15 @@ impl App {
             })
             .response
             .on_hover_text("Solid, dashed, dotted … one pattern per value");
+            ui.switch(&mut look.flow, "Animate the flow").on_hover_text("Dots travel along the edges from source to target");
+            if look.flow {
+                slider(ui, &mut look.flow_speed, 5.0..=400.0, "Flow speed", true);
+                row(ui, "Speed by", |ui| {
+                    restyle |= combo_edge_ref(ui, "flow_by", &mut look.flow_by, &self.s.g, "(all the same)");
+                })
+                .response
+                .on_hover_text("Faster where the attribute is higher (from a quarter to three times the speed)");
+            }
             slider(ui, &mut look.edge_alpha, 0.02..=1.0, "Opacity", true);
             slider(ui, &mut look.edge_width, 0.4..=5.0, if look.edge_width_by.is_some() { "Base width" } else { "Width" }, false);
             if self.s.g.directed {
