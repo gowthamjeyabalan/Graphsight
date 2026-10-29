@@ -916,10 +916,9 @@ impl Session {
             }
         }
         // the time bar: what is dated after the line (or outside the period under it) is taken out
-        if let (Some(days), Some(cursor), Some([v0, v1])) = (&time_days, self.time.cursor, self.time.view) {
-            let unit = crate::timebar::Unit::for_span(v1 - v0);
+        if let (Some(days), Some(cursor)) = (&time_days, self.time.cursor) {
             for i in 0..n.min(days.len()) {
-                if vis[i] && !crate::timebar::passes(days[i], cursor, self.time.only_period, unit) {
+                if vis[i] && !crate::timebar::passes(days[i], cursor, self.time.only_period, self.time.period) {
                     vis[i] = false;
                 }
             }

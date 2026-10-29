@@ -148,17 +148,15 @@ fn col(rgba: [u8; 4]) -> Color32 {
 impl App {
     fn update_highlight(&mut self) {
         let n = self.s.g.n();
-        // a walk stops when the selection is no longer its current node
-        if self.walk.as_ref().is_some_and(|w| self.s.sel_count != 1 || !self.s.sel.get(w.current() as usize).copied().unwrap_or(false)) {
-            self.walk = None;
-        }
+        // a walk (or tour) stays until it is stopped: clicking around does not end it
         if self.walk.is_none() {
             self.tour_play = None;
         }
-        // the spotlight: a walk, focus mode or a downstream wave lights up some nodes and edges; the rest as chosen
+        // the spotlight: a walk, a route, focus mode or a downstream wave lights up some nodes and edges; the rest as
+        // chosen
         let spot = if let Some(w) = &self.walk {
-            Some((0u8, w.version, self.walk_rest))
-        } else if self.focus_mode.is_some() || self.explore.down.is_some() {
+            Some((0u8, w.version, self.spot_rest))
+        } else if self.focus_mode.is_some() || self.explore.down.is_some() || self.explore.shown.is_some() {
             Some((1u8, self.spot_version, self.spot_rest))
         } else {
             None
@@ -694,6 +692,7 @@ impl App {
                 Some(h) => {
                     self.walk = None;
                     self.explore.down = None;
+                    self.explore.shown = None;
                     self.s.select_only(h);
                     let steps = self.focus_mode.as_ref().map_or(1, |f| f.steps);
                     self.focus_mode = Some(crate::explore::FocusMode { center: vec![h as u32], steps });
@@ -702,6 +701,10 @@ impl App {
                 None => self.auto_fit = true,
             }
         }
+        if resp.secondary_clicked() {
+            self.menu_node = self.hover;
+        }
+        resp.context_menu(|ui| self.graph_menu(ui));
 
         // keyboard (not while typing, nor in the frame a text box let go of the keys: Esc that leaves a search box
         // must not also clear the selection)
@@ -749,6 +752,8 @@ impl App {
                     self.focus_mode = None;
                 } else if self.explore.down.is_some() {
                     self.explore.down = None;
+                } else if self.explore.shown.is_some() {
+                    self.explore.shown = None;
                 } else {
                     self.s.clear_selection();
                 }
@@ -917,8 +922,12 @@ impl App {
             }
         }
 
-        // flow: dots travelling along the edges, source to target
-        if look.flow {
+        // flow: dots travelling along the edges, source to target; while a route is on show, only along it
+        if let Some(r) = &self.explore.shown {
+            if !self.explore.still {
+                self.paint_route_flow(painter, off, width, r);
+            }
+        } else if look.flow {
             self.paint_flow(painter, off, width);
         }
 
@@ -1353,13 +1362,18 @@ impl App {
             }
             return;
         }
-        let sel = self.s.selected_list();
-        let on_track = self.walk.as_ref().is_some_and(|w| sel.len() == 1 && sel[0] == w.current());
+        let sel = if self.s.sel_count <= 2 { self.s.selected_list() } else { vec![] };
+        // the walk goes on from where it is, unless another node has been selected to walk from
+        let on_track = self.walk.as_ref().is_some_and(|w| self.s.sel_count == 0 || (sel.len() == 1 && sel[0] == w.current()));
         if !on_track {
-            if sel.len() != 1 {
+            if sel.len() != 1 || self.s.sel_count != 1 {
                 self.toast(ctx, "Select one node, then use the arrow keys to walk the graph from it");
                 return;
             }
+            // one spotlight at a time: a walk ends focus mode, a downstream wave or a route on show
+            self.focus_mode = None;
+            self.explore.down = None;
+            self.explore.shown = None;
             self.walk = Some(Walk::start(&self.s.g, sel[0], self.walk_follow, &self.walk_shown()));
             if !right && !left {
                 // the first ↑ / ↓ only starts the walk and shows the choices
@@ -1471,7 +1485,7 @@ impl App {
         let next = w.picked().map(|(_, v)| self.s.label_of(v as usize));
         let (step, count, pick) = (w.path.len(), w.next.len(), w.pick);
         let mut follow = self.walk_follow;
-        let mut rest = self.walk_rest;
+        let mut rest = self.spot_rest;
         let mut stop = false;
         let mut save_tour = false;
         // bottom left, where it covers the least of the graph
@@ -1512,8 +1526,8 @@ impl App {
             self.walk = None;
             return;
         }
-        if rest != self.walk_rest {
-            self.walk_rest = rest;
+        if rest != self.spot_rest {
+            self.spot_rest = rest;
             self.spot_key = None;
         }
         if follow != self.walk_follow {
@@ -1537,6 +1551,16 @@ impl App {
         let (n, ne) = (g.n(), g.edges.len());
         if let Some(w) = &self.walk {
             return w.marks(n, ne);
+        }
+        if let Some(r) = &self.explore.shown {
+            let (mut nodes, mut edges) = (vec![false; n], vec![false; ne]);
+            for &v in &r.nodes {
+                nodes[v as usize] = true;
+            }
+            for &e in &r.edges {
+                edges[e as usize] = true;
+            }
+            return (nodes, edges);
         }
         let levels = match (&self.focus_mode, &self.explore.down) {
             (Some(f), _) => reach(g, &f.center, Follow::Both, f.steps),
@@ -1598,7 +1622,31 @@ impl App {
     fn spot_panel(&mut self, ui: &mut Ui, rect: Rect) {
         use crate::theme::UiExt;
         use crate::walk::Rest;
-        if self.walk.is_some() || (self.focus_mode.is_none() && self.explore.down.is_none()) {
+        if self.walk.is_some() || self.tour_play.is_some() {
+            return;
+        }
+        if self.explore.shown.is_some() {
+            self.route_panel(ui, rect);
+            return;
+        }
+        if self.focus_mode.is_none() && self.explore.down.is_none() {
+            // two nodes selected: the flow between them is one click away
+            if self.s.sel_count == 2 && self.s.selected_list().len() == 2 {
+                let mut go = false;
+                egui::Area::new(egui::Id::unique("two_chip")).pivot(Align2::LEFT_BOTTOM).fixed_pos(rect.left_bottom() + Vec2::new(10.0, -64.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.weak("2 nodes selected");
+                            go = ui.button("▶ Flow between them").on_hover_text("Find the route between them and run the flow along it").clicked();
+                        });
+                    });
+                });
+                if go {
+                    if let Err(e) = self.route_between_selected() {
+                        self.toast(ui.ctx(), e);
+                    }
+                }
+            }
             return;
         }
         let now = ui.input(|i| i.time);
@@ -1725,6 +1773,7 @@ impl App {
             self.toast(ctx, "None of this tour's stops is in the graph that is loaded");
             return;
         }
+        self.explore.shown = None;
         self.focus_mode = None;
         self.explore.down = None;
         self.tour_play = Some(crate::walk::TourPlay { tour: k, pos: 0, nodes, stop });
@@ -1826,6 +1875,10 @@ impl App {
             let mut guard = 0;
             while s < len && guard < 200 {
                 sink.quad_uv(a + dir * s, r * 1.15, c);
+                // an undirected edge carries flow both ways: a second line of dots coming back
+                if !e.directed {
+                    sink.quad_uv(b - dir * s, r * 0.9, c);
+                }
                 s += gap;
                 guard += 1;
             }
@@ -1834,6 +1887,227 @@ impl App {
             painter.add(Shape::mesh(m));
         }
         painter.ctx().request_repaint();
+    }
+}
+
+impl App {
+    /// The flow along the route on show: dots travelling from its first node to its last, through every hop in
+    /// order whichever way the edges point, with the ends ringed.
+    fn paint_route_flow(&self, painter: &Painter, off: Vec2, width: f32, route: &crate::explore::Route) {
+        let proj = self.s.projector(&self.cam, self.canvas_size);
+        let pts: Vec<Option<Pos2>> = route.nodes.iter().map(|&v| proj.at(&self.s, v as usize).map(|(p, _, _)| Pos2::new(p.x, p.y) + off)).collect();
+        let t = painter.ctx().input(|i| i.time) as f32;
+        let gap = 30.0f32;
+        let r = (width * 1.6).max(2.4);
+        let accent = Color32::from_rgb(10, 132, 255);
+        let mut sink = MeshSink::new(self.tex.small.id());
+        // the distance along the route carries on from hop to hop, so the dots run on smoothly through each node
+        let mut walked = 0.0f32;
+        let shift = (t * self.s.look.flow_speed).rem_euclid(gap);
+        for w in pts.windows(2) {
+            let (Some(a), Some(b)) = (w[0], w[1]) else { continue };
+            let d = b - a;
+            let len = d.length();
+            if len < 1.0 {
+                continue;
+            }
+            let dir = d / len;
+            // the first dot on this hop: where the evenly spaced row of dots meets it
+            let mut s = (shift - walked).rem_euclid(gap);
+            let mut guard = 0;
+            while s < len && guard < 400 {
+                sink.quad_uv(a + dir * s, r * 1.6, Color32::from_rgba_unmultiplied(10, 132, 255, 70));
+                sink.quad_uv(a + dir * s, r, Color32::WHITE);
+                s += gap;
+                guard += 1;
+            }
+            walked += len;
+        }
+        for m in sink.finish() {
+            painter.add(Shape::mesh(m));
+        }
+        for (k, p) in [pts.first(), pts.last()].into_iter().enumerate() {
+            if let Some(Some(p)) = p {
+                let v = if k == 0 { route.nodes[0] } else { *route.nodes.last().unwrap() };
+                let rr = proj.at(&self.s, v as usize).map_or(8.0, |(_, f, _)| node_radius_px(self.s.style.node_r[v as usize], f));
+                painter.circle_stroke(*p, rr + 6.0, Stroke::new(3.0, accent));
+            }
+        }
+        painter.ctx().request_repaint();
+    }
+}
+
+impl App {
+    /// The panel for the route on show: its ends, how long it is, the flow along it, and saving it as a tour.
+    fn route_panel(&mut self, ui: &mut Ui, rect: Rect) {
+        use crate::theme::UiExt;
+        use crate::walk::Rest;
+        let Some(r) = &self.explore.shown else { return };
+        let (a, b) = (self.s.label_of(r.nodes[0] as usize), self.s.label_of(*r.nodes.last().unwrap() as usize));
+        let steps = r.nodes.len() - 1;
+        let cost = self.explore.path_cost.as_ref().map(|c| format!(" · {c} {}", crate::data::fmt_num(r.cost)));
+        let n_routes = self.explore.routes.len();
+        let mut flowing = !self.explore.still;
+        let mut speed = self.s.look.flow_speed;
+        let mut rest = self.spot_rest;
+        let mut stop = false;
+        let mut save = false;
+        let mut other: Option<usize> = None;
+        egui::Area::new(egui::Id::unique("route_panel")).pivot(Align2::LEFT_BOTTOM).fixed_pos(rect.left_bottom() + Vec2::new(10.0, -64.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(340.0);
+                ui.horizontal(|ui| {
+                    ui.label(crate::theme::semibold(format!("{a} → {b}")));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Stop").on_hover_text("Esc").clicked() {
+                            stop = true;
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(format!("{steps} {}{}", if steps == 1 { "step" } else { "steps" }, cost.unwrap_or_default()));
+                    if n_routes > 1 {
+                        let k = self.explore.route_shown.unwrap_or(0);
+                        if ui.small_button("‹").on_hover_text("The previous route").clicked() {
+                            other = Some((k + n_routes - 1) % n_routes);
+                        }
+                        ui.weak(format!("route {} of {n_routes}", k + 1));
+                        if ui.small_button("›").on_hover_text("The next route").clicked() {
+                            other = Some((k + 1) % n_routes);
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.switch(&mut flowing, "Flow");
+                    if flowing {
+                        ui.add(egui::Slider::new(&mut speed, 5.0..=400.0).show_value(false)).on_hover_text("Flow speed");
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.weak("Rest of the graph");
+                    ui.segmented(&mut rest, &[(Rest::AsIs, "As is"), (Rest::Dim, "Dimmed"), (Rest::Hide, "Hidden")]);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Save as a tour…").on_hover_text("Keep the route, with a note at each stop, to play back later (Views ▸ Tours)").clicked() {
+                        save = true;
+                    }
+                    ui.weak("Esc stop");
+                });
+            });
+        });
+        self.explore.still = !flowing;
+        self.s.look.flow_speed = speed;
+        if rest != self.spot_rest {
+            self.spot_rest = rest;
+            self.spot_key = None;
+        }
+        if save {
+            self.name_dialog = Some(crate::presets::NameDialog { what: crate::presets::Naming::Tour, name: String::new() });
+        }
+        if let Some(k) = other {
+            self.show_route(k);
+        }
+        if stop {
+            self.explore.shown = None;
+        }
+    }
+
+    /// The right-click menu on the graph: what can be done from the node under the pointer, or with the selection.
+    fn graph_menu(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let node = self.menu_node.filter(|&h| h < self.s.g.n());
+        let sel = if self.s.sel_count <= 2 { self.s.selected_list() } else { vec![] };
+        let many = self.s.sel_count;
+        let mut close = false;
+        if let Some(h) = node {
+            ui.label(crate::theme::semibold(self.s.label_of(h)));
+            // one other node selected: the flow from it to this one
+            if sel.len() == 1 && sel[0] as usize != h && many == 1 {
+                if ui.button(format!("▶ Flow from {} to here", self.s.label_of(sel[0] as usize))).clicked() {
+                    if let Err(e) = self.route_between(sel[0], h as u32) {
+                        self.toast(&ctx, e);
+                    }
+                    close = true;
+                }
+            }
+            if ui.button("Focus here").on_hover_text("This node and what is near it stand out (also: double-click)").clicked() {
+                self.walk = None;
+                self.explore.down = None;
+                self.explore.shown = None;
+                self.s.select_only(h);
+                let steps = self.focus_mode.as_ref().map_or(1, |f| f.steps);
+                self.focus_mode = Some(crate::explore::FocusMode { center: vec![h as u32], steps });
+                self.spot_version += 1;
+                close = true;
+            }
+            if ui.button("What's downstream").clicked() {
+                self.explore.shown = None;
+                self.start_down(vec![h as u32], crate::walk::Follow::Out, ui.input(|i| i.time));
+                close = true;
+            }
+            if ui.button("What's upstream").clicked() {
+                self.explore.shown = None;
+                self.start_down(vec![h as u32], crate::walk::Follow::In, ui.input(|i| i.time));
+                close = true;
+            }
+            if ui.button("Walk from here").on_hover_text("Then → steps on, ↑ ↓ choose, ← goes back").clicked() {
+                self.focus_mode = None;
+                self.explore.down = None;
+                self.explore.shown = None;
+                self.tour_play = None;
+                self.s.select_only(h);
+                self.walk = Some(crate::walk::Walk::start(&self.s.g, h as u32, self.walk_follow, &self.walk_shown()));
+                close = true;
+            }
+            ui.separator();
+            let id = self.s.g.ids[h].clone();
+            if ui.button("Route from here…").on_hover_text("Then right-click the end ▸ Route to here").clicked() {
+                self.explore.path_from = id.clone();
+                if let Some(b) = self.find_node(&self.explore.path_to.clone()).filter(|&b| b as usize != h) {
+                    if let Err(e) = self.route_between(h as u32, b) {
+                        self.toast(&ctx, e);
+                    }
+                } else {
+                    self.toast(&ctx, "Now right-click where the route should end ▸ Route to here");
+                }
+                close = true;
+            }
+            if ui.button("Route to here").clicked() {
+                self.explore.path_to = id;
+                match self.find_node(&self.explore.path_from.clone()).filter(|&a| a as usize != h) {
+                    Some(a) => {
+                        if let Err(e) = self.route_between(a, h as u32) {
+                            self.toast(&ctx, e);
+                        }
+                    }
+                    None => self.toast(&ctx, "First right-click where the route should start ▸ Route from here"),
+                }
+                close = true;
+            }
+        } else if many > 0 {
+            if sel.len() == 2 && many == 2 && ui.button("▶ Flow between the two selected").clicked() {
+                if let Err(e) = self.route_between_selected() {
+                    self.toast(&ctx, e);
+                }
+                close = true;
+            }
+            let all = self.s.selected_list();
+            if ui.button(format!("What's downstream of the {} selected", all.len())).clicked() {
+                self.explore.shown = None;
+                self.start_down(all.clone(), crate::walk::Follow::Out, ui.input(|i| i.time));
+                close = true;
+            }
+            if ui.button(format!("What's upstream of the {} selected", all.len())).clicked() {
+                self.explore.shown = None;
+                self.start_down(all, crate::walk::Follow::In, ui.input(|i| i.time));
+                close = true;
+            }
+        } else {
+            ui.weak("Right-click a node for more");
+        }
+        if close {
+            ui.close();
+        }
     }
 }
 

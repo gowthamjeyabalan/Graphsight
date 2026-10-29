@@ -134,12 +134,14 @@ selection has been cleared) bring the panels back.
 **Nodes table columns** — right-click a column header to hide it, Ctrl+click headers to pick several, or use the
 *Columns* button above the table to tick columns on and off, hide the picked ones and *Show all* again.
 
-**Walking the graph** — select one node and use the arrow keys: **→** steps along an edge, **↑ / ↓** choose which
+**Walking the graph** — select one node and use the arrow keys (or right-click a node ▸ *Walk from here*; the
+settings are also under *Query ▸ Walking*): **→** steps along an edge, **↑ / ↓** choose which
 neighbour comes next when there are several, **←** goes back the way you came, **Esc** stops (a second Esc clears the
 selection). Steps follow the edge directions (*Along arrows*), go against them (*Against*) or take any edge; places
 not visited yet are offered first. The path is drawn over the graph as a numbered blue trail with rings on its nodes,
 and thin lines show the next steps (the chosen one dashed), so the graph's own colours stay as they are. The rest of
-the graph can stay *As is*, be *Dimmed* or *Hidden*. A small panel at the bottom left shows where you are and what is
+the graph can stay *As is*, be *Dimmed* or *Hidden* (one setting, shared with routes, focus mode and downstream
+waves). Clicking other nodes does not end the walk; the arrow keys go on from another node once it is selected. A small panel at the bottom left shows where you are and what is
 next, and the view follows when the walk reaches the edge of the screen.
 
 **Focus mode** — double-click a node: it and everything within a number of steps of it stand out, the rest is
@@ -149,10 +151,16 @@ dimmed (or hidden, or left as it is). **+ / −** or **Alt + scroll** take in mo
 them, *Upstream*, or both), played wave by wave with ▶ and a step slider; the start and the front of the wave are
 ringed, and the counts per step are listed. *Select all reached* selects it all.
 
-**Path between two nodes** — *Query ▸ Path between two nodes*: give the two ends (an id or name, the selected node,
-or the two selected nodes), along the arrows or any way, by fewest steps or the cheapest by any numeric edge
-attribute. Up to five routes are found, best first, with genuine alternatives; the chosen one is drawn as a walk,
-and **←** steps back along it.
+**Path between two nodes, with the flow along it** — select two nodes and click **▶ Flow between them** (it appears
+at the bottom left of the graph), or right-click a node ▸ *Flow from … to here*. The route between them lights up
+and dots run along it from one end to the other; nothing else flows. The route stays while you click around, until
+**Esc** or *Stop*; its panel switches the flow on or off, sets its speed, steps through the other routes and saves it
+as a tour. *Query ▸ Path between two nodes* does the same from ids or names, along the arrows or any way, by fewest
+steps or the cheapest by any numeric edge attribute (up to five routes, best first).
+
+**Right-click menu** — right-click a node: *Focus here*, *What's downstream / upstream*, *Walk from here*,
+*Route from here… / Route to here*. With nodes selected and nothing under the pointer: the flow between the two
+selected, or what is downstream / upstream of the selection.
 
 **Bottlenecks** — *Query ▸ Bottlenecks* finds the nodes and connections whose loss splits the network into pieces
 (every connection taken as two-way), each with how many nodes it would cut off, largest first. Select them all, or
@@ -162,14 +170,15 @@ click one to go to it.
 arrow keys (or Back / Next), with a note at each stop that can be written right there. Tours are saved in the session.
 
 **Flow animation** — *Appearance ▸ Edges ▸ Animate the flow*: dots travel along the edges from source to target, at
-the flow speed, faster or slower by any attribute (*Speed by*).
+the flow speed, faster or slower by any attribute (*Speed by*). Undirected edges carry dots both ways.
 
 **Time bar** — *Filter ▸ Time*: choose an attribute holding dates (2024-03-12, 12/03/2024, 12 Mar 2024, Mar 2024,
 a year, an Excel date number; with a time of day too) and a rounded bar appears along the top of the graph. It shows
 days, months or years depending on how far it is zoomed (the scroll wheel over the bar zooms, Shift + scroll pans, the
 *Days · Months · Years* chips jump to a scale, double-click shows all of it), with a small chart of how many nodes fall
 in each period. Drag the vertical line: nodes dated after it are taken out like filtered-out nodes (dimmed or hidden),
-or, with *Only the day / month / year under the line*, everything outside that period. ▶ plays time forward. The bar
+or, with *Only the day / month / year under the line* (the period is chosen there, whatever the bar's zoom),
+everything outside that period. ▶ plays time forward. The bar
 and its place are kept in the session.
 
 **Edges table and edge details** — the *Edges* tab (next to *Nodes*, or *Window ▸ Edges*) lists the edges on show

@@ -17,13 +17,15 @@ pub struct TimeSettings {
     /// The moment shown, and the part of time the bar spans (days since 1970-01-01).
     pub cursor: Option<f64>,
     pub view: Option<[f64; 2]>,
-    /// Keep only what is dated in the day / month / year under the line, instead of everything up to it.
+    /// Keep only what is dated in the period (day, month or year) under the line, instead of everything up to it.
     pub only_period: bool,
+    pub period: Unit,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Unit {
     Day,
+    #[default]
     Month,
     Year,
 }
@@ -232,7 +234,13 @@ impl App {
                 ui.weak(format!("{dated} nodes have a date"));
             }
             let mut changed = ui.switch(&mut self.s.time.show, "Show the time bar").changed();
-            changed |= ui.switch(&mut self.s.time.only_period, "Only the day / month / year under the line").on_hover_text("Off: everything up to the line").changed();
+            ui.horizontal(|ui| {
+                changed |= ui.switch(&mut self.s.time.only_period, "Only the").on_hover_text("Off: everything up to the line").changed();
+                ui.add_enabled_ui(self.s.time.only_period, |ui| {
+                    changed |= ui.segmented(&mut self.s.time.period, &[(Unit::Day, "day"), (Unit::Month, "month"), (Unit::Year, "year")]);
+                });
+                ui.label("under the line");
+            });
             if changed {
                 self.refilter();
             }
@@ -250,6 +258,7 @@ impl App {
         let [v0, v1] = t.view?;
         let cursor = t.cursor?;
         let only = t.only_period;
+        let period = t.period;
         let days = self.s.time_days();
         let span = (v1 - v0).max(1e-3);
         let unit = Unit::for_span(span);
@@ -331,7 +340,8 @@ impl App {
             let (x0, x1) = (to_x(s).max(track.left()), to_x(e).min(track.right()));
             if n > 0 && x1 > x0 {
                 let h = chart.height() * (n as f32 / most as f32);
-                let fill = if only && bucket_start(cursor, unit) == s { accent.gamma_multiply(0.75) } else { accent.gamma_multiply(0.28) };
+                let (p0, p1) = (bucket_start(cursor, period), bucket_next(bucket_start(cursor, period), period));
+                let fill = if only && s >= p0 && s < p1 { accent.gamma_multiply(0.75) } else { accent.gamma_multiply(0.28) };
                 painter.rect_filled(Rect::from_min_max(Pos2::new(x0 + 0.5, chart.bottom() - h), Pos2::new((x1 - 0.5).max(x0 + 1.0), chart.bottom())), 1.5, fill);
             }
             if to_x(s) >= track.left() {
@@ -355,6 +365,14 @@ impl App {
         let cx = to_x(cursor).clamp(track.left(), track.right());
         if !only && cx < track.right() {
             painter.rect_filled(Rect::from_min_max(Pos2::new(cx, track.top() + 12.0), track.max), 4.0, v.window_fill().gamma_multiply(0.55));
+        }
+        // with only one period kept: that period is marked as a band under the line
+        if only {
+            let p0 = bucket_start(cursor, period);
+            let (x0, x1) = (to_x(p0).max(track.left()), to_x(bucket_next(p0, period)).min(track.right()));
+            if x1 > x0 {
+                painter.rect_filled(Rect::from_min_max(Pos2::new(x0, track.top() + 12.0), Pos2::new(x1.max(x0 + 2.0), track.bottom())), 3.0, accent.gamma_multiply(0.14));
+            }
         }
         // the line, with a tag carrying the date
         painter.line_segment([Pos2::new(cx, track.top() + 8.0), Pos2::new(cx, track.bottom() + 2.0)], Stroke::new(2.0, accent));

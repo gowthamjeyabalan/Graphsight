@@ -56,15 +56,16 @@ pub struct App {
     /// stand out while walking, and what the highlight was last worked out for.
     pub walk: Option<crate::walk::Walk>,
     pub walk_follow: crate::walk::Follow,
-    pub walk_rest: crate::walk::Rest,
     pub hi_edges: Vec<bool>,
     /// The spotlight (a walk, focus mode or a downstream wave): what it was last worked out for, how the rest looks
     /// while one is on, and a counter that changes whenever focus mode or the wave does.
     pub spot_key: Option<(u8, u64, u8)>,
     pub hi_rest: Option<crate::walk::Rest>,
     pub spot_version: u64,
-    /// How the rest looks in focus mode and during a downstream wave.
+    /// How the rest of the graph looks while a walk, a route, focus mode or a downstream wave is on.
     pub spot_rest: crate::walk::Rest,
+    /// The node a right-click menu on the graph was opened over.
+    pub menu_node: Option<usize>,
     pub focus_mode: Option<crate::explore::FocusMode>,
     /// Downstream waves, routes and bottlenecks (Query tab).
     pub explore: crate::explore::ExploreState,
@@ -208,13 +209,13 @@ impl App {
             hover_edge_at: None,
             walk: None,
             walk_follow: Default::default(),
-            walk_rest: Default::default(),
             hi_edges: vec![],
             was_typing: false,
             spot_key: None,
             hi_rest: None,
             spot_version: 0,
             spot_rest: crate::walk::Rest::Dim,
+            menu_node: None,
             focus_mode: None,
             explore: Default::default(),
             tours: vec![],
@@ -2387,13 +2388,13 @@ f 2 4 8 6
         assert!(h.app.s.sel[start]);
         // the rest of the graph: hidden leaves only the path and the next steps
         h.press_plain(Key::ArrowRight);
-        h.app.walk_rest = Rest::Hide;
+        h.app.spot_rest = Rest::Hide;
         h.app.spot_key = None;
         h.frames(2);
         let marked = h.app.walk.as_ref().unwrap().marks(h.app.s.g.n(), h.app.s.g.edges.len()).0.iter().filter(|x| **x).count();
         assert!(h.app.draw.nodes.len() <= marked && h.app.draw.nodes.len() >= 2, "{} drawn, {marked} marked", h.app.draw.nodes.len());
         // as is: everything drawn again
-        h.app.walk_rest = Rest::AsIs;
+        h.app.spot_rest = Rest::AsIs;
         h.frames(2);
         assert!(h.app.draw.nodes.len() > marked);
         // Esc stops the walk but keeps the node selected; a second Esc clears it
@@ -2462,7 +2463,27 @@ f 2 4 8 6
         h.frames(2);
         h.app.explore.down = None;
 
-        // a route from a to d, shown as a walk; bottlenecks of the chain
+        // two selected nodes: the route between them is lit up with the flow along it, and the selection is kept
+        h.app.s.select_only(id(&h, "d"));
+        h.app.s.set_selected(id(&h, "a"), true);
+        h.app.route_between_selected().unwrap();
+        h.frames(2);
+        let r = h.app.explore.shown.clone().unwrap();
+        let names: Vec<&str> = r.nodes.iter().map(|&v| h.app.s.g.ids[v as usize].as_str()).collect();
+        assert_eq!(names, ["a", "b", "c", "d"]);
+        assert!(h.app.walk.is_none() && h.app.s.sel[id(&h, "a")] && h.app.s.sel[id(&h, "d")], "the two picked nodes stay selected");
+        assert!(h.app.focus[id(&h, "c")] && !h.app.focus[id(&h, "e")], "the route stands out, the rest does not");
+        // clicking about keeps it; Esc stops it
+        h.app.s.select_only(id(&h, "f"));
+        h.frames(2);
+        assert!(h.app.explore.shown.is_some());
+        h.press_plain(Key::Escape);
+        assert!(h.app.explore.shown.is_none());
+        // f and g are not joined to the chain: no route, and nothing shown
+        h.app.s.set_selected(id(&h, "a"), true);
+        assert!(h.app.route_between_selected().is_err() && h.app.explore.shown.is_none());
+
+        // a route from a to d found in the Query tab; bottlenecks of the chain
         h.app.explore.path_from = "a".into();
         h.app.explore.path_to = "d".into();
         let (from, to) = (h.app.find_node("a").unwrap(), h.app.find_node("D").unwrap());
@@ -2470,8 +2491,7 @@ f 2 4 8 6
         assert_eq!(h.app.explore.routes[0].nodes.len(), 4);
         h.app.show_route(0);
         h.frames(2);
-        assert_eq!(h.app.walk.as_ref().unwrap().path.len(), 4);
-        assert!(h.app.s.sel[id(&h, "d")]);
+        assert_eq!(h.app.explore.shown.as_ref().unwrap().nodes.len(), 4);
         let cuts = crate::explore::bottlenecks(&h.app.s.g);
         assert!(cuts.nodes.iter().any(|&(v, _)| v as usize == b), "b holds the chain together");
 
@@ -2480,7 +2500,7 @@ f 2 4 8 6
         h.frames(1);
         let ctx = h.ctx.clone();
         // save through the same path as the dialog's Save button
-        let stops: Vec<crate::walk::TourStop> = h.app.walk.as_ref().unwrap().path.iter().map(|&(v, _)| crate::walk::TourStop { id: h.app.s.g.ids[v as usize].clone(), note: String::new() }).collect();
+        let stops: Vec<crate::walk::TourStop> = h.app.explore.shown.as_ref().unwrap().nodes.iter().map(|&v| crate::walk::TourStop { id: h.app.s.g.ids[v as usize].clone(), note: String::new() }).collect();
         h.app.tours.push(crate::walk::Tour { name: "Main line".into(), stops });
         h.app.name_dialog = None;
         h.app.play_tour(&ctx, 0);
@@ -2489,7 +2509,11 @@ f 2 4 8 6
         h.press_plain(Key::ArrowRight);
         h.press_plain(Key::ArrowRight);
         assert_eq!(h.app.tour_play.as_ref().unwrap().pos, 2);
-        assert!(h.app.s.sel[id(&h, "c")]);
+        assert!(h.app.s.sel[id(&h, "c")] && h.app.explore.shown.is_none(), "a tour takes over from the route");
+        // clicking another node does not end the tour
+        h.app.s.select_only(id(&h, "f"));
+        h.frames(2);
+        assert_eq!(h.app.tour_play.as_ref().unwrap().pos, 2);
         h.app.tours[0].stops[2].note = "Valve check here".into();
         h.press_plain(Key::ArrowLeft);
         assert!(h.app.s.sel[id(&h, "b")]);
@@ -2514,6 +2538,7 @@ f 2 4 8 6
         let shown: Vec<String> = (0..h.app.s.g.n()).filter(|&i| h.app.s.vis[i]).map(|i| h.app.s.g.ids[i].clone()).collect();
         assert_eq!(shown, ["a", "b", "c", "g"]);
         h.app.s.time.only_period = true;
+        h.app.s.time.period = crate::timebar::Unit::Month;
         h.app.s.time.view = Some([crate::timebar::days_from_civil(2023, 12, 1) as f64, crate::timebar::days_from_civil(2024, 7, 1) as f64]);
         h.app.refilter();
         let shown: Vec<String> = (0..h.app.s.g.n()).filter(|&i| h.app.s.vis[i]).map(|i| h.app.s.g.ids[i].clone()).collect();

@@ -383,7 +383,12 @@ impl App {
                     self.toast(ctx, format!("Preset “{name}” saved"));
                 }
                 Naming::Tour => {
-                    let stops = self.walk.as_ref().map(|w| w.path.iter().map(|&(v, _)| crate::walk::TourStop { id: self.s.g.ids[v as usize].clone(), note: String::new() }).collect()).unwrap_or_default();
+                    let nodes: Vec<u32> = match (&self.walk, &self.explore.shown) {
+                        (Some(w), _) => w.path.iter().map(|p| p.0).collect(),
+                        (None, Some(r)) => r.nodes.clone(),
+                        _ => vec![],
+                    };
+                    let stops = nodes.iter().map(|&v| crate::walk::TourStop { id: self.s.g.ids[v as usize].clone(), note: String::new() }).collect();
                     let t = crate::walk::Tour { name: name.clone(), stops };
                     match self.tours.iter_mut().find(|q| q.name.eq_ignore_ascii_case(&name)) {
                         Some(q) => *q = t,

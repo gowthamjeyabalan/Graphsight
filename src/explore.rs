@@ -348,6 +348,10 @@ pub struct ExploreState {
     pub route_shown: Option<usize>,
     pub path_msg: Option<String>,
     pub cuts: Option<Cuts>,
+    /// The route on show: lit up, with the flow running along it from its first node to its last (unless `still`).
+    /// It stays while the selection changes, until it is stopped.
+    pub shown: Option<Route>,
+    pub still: bool,
 }
 
 impl App {
@@ -383,17 +387,52 @@ impl App {
     /// Show one of the routes found: as a walk along it, ending at its last node.
     pub fn show_route(&mut self, k: usize) {
         let Some(r) = self.explore.routes.get(k).cloned() else { return };
-        let mut path: Vec<(u32, Option<u32>)> = vec![(r.nodes[0], None)];
-        for (i, &v) in r.nodes.iter().enumerate().skip(1) {
-            path.push((v, r.edges.get(i - 1).copied()));
-        }
-        let last = *r.nodes.last().unwrap();
+        // one spotlight at a time; the selection is left as it is
+        self.walk = None;
+        self.tour_play = None;
         self.focus_mode = None;
         self.explore.down = None;
-        self.s.select_only(last as usize);
-        self.walk = Some(crate::walk::Walk { path, next: vec![], pick: 0, version: self.spot_version + 1 });
+        self.explore.shown = Some(r);
+        self.explore.still = false;
         self.spot_version += 1;
         self.explore.route_shown = Some(k);
+    }
+
+    /// Find the routes from `a` to `b` (along the arrows when there is such a route, else from `b` to `a` along the
+    /// arrows, else any way), list them in the Query tab and show the best with the flow running along it.
+    pub fn route_between(&mut self, a: u32, b: u32) -> Result<(), String> {
+        if a == b {
+            return Err("Start and end are the same node.".into());
+        }
+        let col = self.explore.path_cost.as_deref().and_then(|c| self.s.g.edge_col(c));
+        let mut found = None;
+        for (x, y, follow) in [(a, b, Follow::Out), (b, a, Follow::Out), (a, b, Follow::Both)] {
+            let rs = routes(&self.s.g, x, y, follow, col, 5);
+            if !rs.is_empty() {
+                found = Some((x, y, follow, rs));
+                break;
+            }
+        }
+        let Some((x, y, follow, rs)) = found else {
+            self.explore.path_msg = Some("No route joins them.".into());
+            return Err("No route joins these two nodes".into());
+        };
+        self.explore.path_from = self.s.g.ids[x as usize].clone();
+        self.explore.path_to = self.s.g.ids[y as usize].clone();
+        self.explore.path_follow = follow;
+        self.explore.routes = rs;
+        self.explore.path_msg = None;
+        self.show_route(0);
+        Ok(())
+    }
+
+    /// The route between the two selected nodes, with the flow along it.
+    pub fn route_between_selected(&mut self) -> Result<(), String> {
+        let sel = self.s.selected_list();
+        if sel.len() != 2 {
+            return Err("Select two nodes".into());
+        }
+        self.route_between(sel[0], sel[1])
     }
 
     /// The Query tab's exploring tools, under the connection query.
@@ -403,6 +442,31 @@ impl App {
         }
         let now = ui.input(|i| i.time);
         let red = egui::Color32::from_rgb(235, 100, 90);
+
+        // ── walking ──
+        ui.add_space(10.0);
+        crate::theme::heading(ui, "Walking");
+        ui.weak("Select a node and press → (or right-click a node ▸ Walk from here). → steps on, ↑ ↓ choose the next step, ← goes back, Esc stops.");
+        let mut follow = self.walk_follow;
+        ui.segmented(&mut follow, &[(Follow::Out, "Along arrows"), (Follow::In, "Against"), (Follow::Both, "Any edge")]);
+        if follow != self.walk_follow {
+            self.walk_follow = follow;
+            let shown: Vec<bool> = (0..self.s.g.n()).map(|i| self.s.vis[i] || self.s.dimmed.get(i).copied().unwrap_or(false)).collect();
+            if let Some(w) = self.walk.as_mut() {
+                w.refresh(&self.s.g, follow, &shown);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("Rest of the graph");
+            let mut rest = self.spot_rest;
+            ui.segmented(&mut rest, &[(crate::walk::Rest::AsIs, "As is"), (crate::walk::Rest::Dim, "Dimmed"), (crate::walk::Rest::Hide, "Hidden")]);
+            if rest != self.spot_rest {
+                self.spot_rest = rest;
+                self.spot_key = None;
+            }
+        })
+        .response
+        .on_hover_text("While walking, showing a route, in focus mode or during a downstream wave");
 
         // ── what's downstream ──
         ui.add_space(10.0);
@@ -474,9 +538,12 @@ impl App {
                 }
             });
         }
-        if ui.add_enabled(sel.len() == 2, egui::Button::new("Use the two selected nodes")).clicked() {
-            self.explore.path_from = self.s.g.ids[sel[0] as usize].clone();
-            self.explore.path_to = self.s.g.ids[sel[1] as usize].clone();
+        if ui
+            .add_enabled(sel.len() == 2, egui::Button::new("▶ Flow between the two selected"))
+            .on_hover_text("Find the route between the two selected nodes and run the flow along it (also: right-click the graph)")
+            .clicked()
+        {
+            let _ = self.route_between_selected();
         }
         ui.segmented(&mut self.explore.path_follow, &[(Follow::Out, "Along arrows"), (Follow::Both, "Any way")]);
         let numeric: Vec<String> = self.s.g.edge_cols.iter().filter(|c| c.is_numeric()).map(|c| c.name.clone()).collect();
@@ -507,6 +574,9 @@ impl App {
                 self.show_route(0);
             }
         }
+        if self.explore.shown.is_some() && ui.button("Stop showing the route").clicked() {
+            self.explore.shown = None;
+        }
         if let Some(m) = &self.explore.path_msg {
             ui.colored_label(red, m);
         }
@@ -515,7 +585,7 @@ impl App {
         for (k, r) in self.explore.routes.iter().enumerate() {
             let steps = r.nodes.len() - 1;
             let text = if costed { format!("Route {}: {steps} steps, cost {}", k + 1, crate::data::fmt_num(r.cost)) } else { format!("Route {}: {steps} steps", k + 1) };
-            if ui.selectable_label(self.explore.route_shown == Some(k) && self.walk.is_some(), text).on_hover_text("Show it as a walk; the left arrow steps back along it").clicked() {
+            if ui.selectable_label(self.explore.route_shown == Some(k) && self.explore.shown.is_some(), text).on_hover_text("Show it, with the flow running along it").clicked() {
                 show = Some(k);
             }
         }
